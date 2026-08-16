@@ -11,6 +11,7 @@ local JobState = require "JobState"
 local pluginConfig = require "PluginConfig"
 
 local prefs = LrPrefs.prefsForPlugin()
+local APPLY_BATCH_SIZE = 25
 
 local function repairManifestFilenames(manifest)
     local changed = false
@@ -101,28 +102,44 @@ local function validateResult(result, active, manifest, photoById)
 end
 
 local function applyResults(catalog, manifest, resultById, photoById, progress)
-    local writeStatus = catalog:withWriteAccessDo(
-        "Apply Stock Metadata Job",
-        function()
-            for index, entry in ipairs(manifest.photos) do
-                local metadata, photo = resultById[entry.photo_id], photoById[entry.photo_id]
-                progress:setCaption("Applying " .. tostring(index) .. " of " .. tostring(#manifest.photos) .. ": " .. entry.filename)
-                progress:setPortionComplete(index - 1, #manifest.photos)
-                photo:setRawMetadata("title", metadata.title)
-                photo:setRawMetadata("caption", metadata.description)
-                for _, keywordName in ipairs(metadata.keywords) do
-                    local keyword = catalog:createKeyword(keywordName, {}, true, nil, true)
-                    photo:addKeyword(keyword)
+    local total = #manifest.photos
+    local keywordByName = {}
+    for batchStart = 1, total, APPLY_BATCH_SIZE do
+        local batchEnd = math.min(batchStart + APPLY_BATCH_SIZE - 1, total)
+        progress:setCaption(
+            "Applying photos " .. tostring(batchStart) .. "-" .. tostring(batchEnd) .. " of " .. tostring(total)
+        )
+        progress:setPortionComplete(batchStart - 1, total)
+        local writeStatus = catalog:withWriteAccessDo(
+            "Apply Stock Metadata Job",
+            function()
+                for index = batchStart, batchEnd do
+                    local entry = manifest.photos[index]
+                    local metadata, photo = resultById[entry.photo_id], photoById[entry.photo_id]
+                    photo:setRawMetadata("title", metadata.title)
+                    photo:setRawMetadata("caption", metadata.description)
+                    for _, keywordName in ipairs(metadata.keywords) do
+                        local keyword = keywordByName[keywordName]
+                        if not keyword then
+                            keyword = catalog:createKeyword(keywordName, {}, true, nil, true)
+                            if not keyword then error("Could not create or find Lightroom keyword: " .. keywordName) end
+                            keywordByName[keywordName] = keyword
+                        end
+                        photo:addKeyword(keyword)
+                    end
+                    photo:setRawMetadata("instructions", metadata.agency_instruction)
                 end
-                photo:setRawMetadata("instructions", metadata.agency_instruction)
-            end
-        end,
-        { timeout = 30 }
-    )
-    if writeStatus ~= nil and writeStatus ~= "executed" then
-        return nil, "Lightroom catalog write access timed out."
+            end,
+            { timeout = 30 }
+        )
+        if writeStatus ~= nil and writeStatus ~= "executed" then
+            return nil, "Lightroom catalog write access timed out while applying photos "
+                .. tostring(batchStart) .. "-" .. tostring(batchEnd) .. "."
+        end
+        progress:setPortionComplete(batchEnd, total)
+        LrTasks.yield()
     end
-    return { updated = #manifest.photos }
+    return { updated = total }
 end
 
 LrTasks.startAsyncTask(function()

@@ -175,6 +175,14 @@ class LightroomAsyncContractTests(unittest.TestCase):
         self.assertIn('active.status == "downloaded"', self.check_source)
         self.assertIn("completed_result.json", self.check_source)
 
+    def test_result_apply_batches_catalog_writes_and_reuses_keywords(self) -> None:
+        self.assertIn("local APPLY_BATCH_SIZE = 25", self.check_source)
+        self.assertIn("for batchStart = 1, total, APPLY_BATCH_SIZE do", self.check_source)
+        self.assertIn("local keywordByName = {}", self.check_source)
+        self.assertIn("local keyword = keywordByName[keywordName]", self.check_source)
+        self.assertIn("keywordByName[keywordName] = keyword", self.check_source)
+        self.assertIn("LrTasks.yield()", self.check_source)
+
     def test_status_menu_and_timeout_contract_are_present(self) -> None:
         self.assertIn("Check Job Status / Apply Results", self.info_source)
         self.assertIn('"POST",\n        settings.timeoutSeconds', self.client_source)
