@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.venv/
+_uploads/
+_jobs/
+_resized_for_ai/

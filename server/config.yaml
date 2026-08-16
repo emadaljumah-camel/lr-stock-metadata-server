@@ -1,0 +1,38 @@
+server:
+  host: "localhost"
+  port: 8003
+  upload_dir: "_uploads"
+  jobs_dir: "_jobs"
+  max_job_workers: 1
+
+models:
+  lm_studio_base_url: "http://localhost:1234/v1"
+  lm_studio_api_key: "lm-studio"
+
+  # Put the exact model id/name shown by LM Studio here.
+  # Example: "qwen2.5-vl-7b-instruct"
+  hybrid_local_model: "google/gemma-4-31b-qat"
+
+  # Used only when the local hybrid path is unavailable or fails.
+  allow_cloud_fallback: false
+  fallback_provider: "gemini" # gemini or openai
+  gemini_model: "gemini-3-flash-preview"
+  openai_model: "gpt-5.4-mini"
+
+  # Optional. Leave blank if you prefer environment variables or do not use that provider.
+  gemini_api_key: ""
+  openai_api_key: ""
+
+metadata:
+  agency_style: "generic" # generic, getty, adobe, or shutterstock
+  agency_routing_thresholds:
+    strong_getty_threshold: 88
+    possible_getty_threshold: 73
+    adobe_shutterstock_threshold: 58
+
+geocoding:
+  reverse_url: "https://nominatim.openstreetmap.org/reverse"
+  user_agent: "PhotoMetadataTool/1.0"
+  wikipedia_geosearch_url: "https://en.wikipedia.org/w/api.php"
+  wikipedia_radius_meters: 10000
+  wikipedia_limit: 10
