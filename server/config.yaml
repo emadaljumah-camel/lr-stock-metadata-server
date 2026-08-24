@@ -11,7 +11,7 @@ models:
 
   # Put the exact model id/name shown by LM Studio here.
   # Example: "qwen2.5-vl-7b-instruct"
-  hybrid_local_model: "google/gemma-4-31b-qat"
+  hybrid_local_model: "qwen/qwen3.8-27b"
 
   # Used only when the local hybrid path is unavailable or fails.
   allow_cloud_fallback: false

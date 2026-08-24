@@ -422,10 +422,10 @@ Return selected_agency as exactly one of:
 - adobe_shutterstock
 
 Decision Rules:
-- getty: Image must be technically strong AND pass at least ONE Getty eligibility gate:
-  A) hard to repeat due to rarity, access, timing, weather, or unusual viewpoint;
+- getty: Image must be technically usable, properly exposed, and reasonably sharp AND pass at least ONE Getty eligibility gate:
+  A) less routine or less easily repeated due to conditions, timing, access, or viewpoint;
   B) strong authentic candid human/documentary story;
-  C) exceptional atmospheric, cinematic, environmental, or visually memorable distinctiveness.
+  C) clear atmospheric, cinematic, environmental, or visual distinctiveness.
   D) a recognizable or important landmark or location presented with distinctive composition, conditions, timing, access, context, or visual interpretation.
 - adobe_shutterstock: technically clean but repeatable/generic images, normal travel scenes, ordinary architecture, birds, landmarks, landscapes, objects, and other common subjects without a distinctive documentary, atmospheric, visual, or emotional edge.
 
@@ -491,7 +491,7 @@ Internal Decision Tests:
    - Use only supplied reverse-geocode information, supplied nearby candidates, and visible evidence.
    - Do not invent or assume a landmark from visual similarity alone.
    - Distinctive conditions, composition, timing, access, context, or interpretation strengthen Getty eligibility.
-   - A routine or easily repeated view remains adobe_shutterstock.
+   - A routine view may qualify for Getty when its composition, light, atmosphere, context, or buyer usefulness is clearly above ordinary.
 
 Important Constraints:
 - Technical quality is required for Getty but is never sufficient by itself.
@@ -499,7 +499,7 @@ Important Constraints:
 - Location, GPS, city, country, or famous landmark status must not drive Getty selection by itself.
 - Do not estimate current market demand, sales potential, search trends, popularity, or the current contents of any stock library.
 - A recognizable landmark or location must also provide distinctive interpretation, unusual conditions, valuable context, rare timing, access, or difficult-to-repeat coverage.
-- Generic/attainable images default to adobe_shutterstock even if beautiful.
+- Generic images default to adobe_shutterstock, but attainable subjects may qualify for Getty when their visual treatment is notably distinctive.
 - No-people images may still be Getty if they have exceptional atmosphere, rare timing, difficult access, strong environmental storytelling, or distinctive visual interpretation.
 - People images should not automatically become Getty. Candid people only matter if they create story, context, or emotional/documentary value.
 - Ordinary candid people in common travel scenes usually remain adobe_shutterstock.
