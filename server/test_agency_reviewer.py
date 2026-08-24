@@ -5,8 +5,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from .agency_reviewer import (
+    AGENCY_REVIEW_SCHEMA_VERSION,
     AgencyDedupDecision,
     AgencyReviewDecision,
+    _build_review_system_prompt,
+    _build_review_user_prompt,
     _build_windows,
     review_agency_assignments,
 )
@@ -48,7 +51,7 @@ class AgencyReviewerTests(unittest.TestCase):
         results = [
             result("photo-promote", "agency:shutterstock_editorial"),
             result("photo-demote", "agency:getty_editorial"),
-            result("photo-commercial", "agency:getty_commercial", editorial=False),
+            result("photo-commercial", "agency:adobe_shutterstock", editorial=False),
         ]
         saved: list[dict] = []
         decisions = [
@@ -65,15 +68,37 @@ class AgencyReviewerTests(unittest.TestCase):
             ),
             AgencyReviewDecision(
                 "photo-commercial",
-                "adobe_shutterstock",
-                68,
-                58,
-                False,
-                "repeatable scenic frame",
+                "getty",
+                86,
+                88,
+                True,
+                "exceptional commercial atmosphere",
+            ),
+        ]
+        finalist_decisions = [
+            AgencyDedupDecision(
+                "photo-promote",
+                "documentary",
+                True,
+                None,
+                "distinct editorial scene",
+            ),
+            AgencyDedupDecision(
+                "photo-commercial",
+                "commercial",
+                True,
+                None,
+                "distinct commercial scene",
             ),
         ]
 
-        with patch("server.agency_reviewer._call_review_model", return_value=decisions):
+        with (
+            patch("server.agency_reviewer._call_review_model", return_value=decisions),
+            patch(
+                "server.agency_reviewer._call_dedup_model",
+                return_value=finalist_decisions,
+            ),
+        ):
             reviewed = review_agency_assignments(
                 results=results,
                 preview_paths={
@@ -85,9 +110,24 @@ class AgencyReviewerTests(unittest.TestCase):
 
         self.assertEqual(reviewed[0].agency_instruction, "agency:getty_editorial")
         self.assertEqual(reviewed[1].agency_instruction, "agency:shutterstock_editorial")
-        self.assertEqual(reviewed[2].agency_instruction, "agency:adobe_shutterstock")
+        self.assertEqual(reviewed[2].agency_instruction, "agency:getty_commercial")
         self.assertIn("getty=91", reviewed[0].reason)
         self.assertTrue(saved)
+
+    def test_review_prompt_hides_usage_flags_and_supports_commercial_getty(self) -> None:
+        results = [
+            result("photo-a", "agency:shutterstock_editorial"),
+            result("photo-b", "agency:adobe_shutterstock", editorial=False),
+        ]
+
+        user_prompt = _build_review_user_prompt(results, 75, 73)
+        system_prompt = _build_review_system_prompt({}, 75, 73)
+
+        self.assertNotIn('"editorial":', user_prompt)
+        self.assertNotIn('"commercial":', user_prompt)
+        self.assertIn(
+            "Commercially licensable photographs can qualify", system_prompt
+        )
 
     def test_getty_score_below_absolute_threshold_is_not_promoted(self) -> None:
         results = [result("photo-best-of-weak-set", "agency:shutterstock_editorial")]
@@ -255,7 +295,7 @@ class AgencyReviewerTests(unittest.TestCase):
             ),
         ]
         checkpoint = {
-            "schema_version": 2,
+            "schema_version": AGENCY_REVIEW_SCHEMA_VERSION,
             "windows": {
                 "window-0001": {
                     "photo_ids": ["photo-a", "photo-b"],

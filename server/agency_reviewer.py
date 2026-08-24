@@ -21,7 +21,7 @@ from .photo_metadata_adapter import (
 )
 
 
-AGENCY_REVIEW_SCHEMA_VERSION = 2
+AGENCY_REVIEW_SCHEMA_VERSION = 3
 
 
 def _bool_setting(path: str, default: bool, *env_names: str) -> bool:
@@ -518,6 +518,12 @@ COMPARATIVE SEQUENCE RULES:
 - The image is authoritative. Titles and descriptions are supporting context and
   may contain errors. Never combine attributes belonging to different people.
 - Editorial status is a usage constraint, not a measure of Getty quality.
+- Apply the same Getty quality and merit standards regardless of licensing type.
+- Commercially licensable photographs can qualify through exceptional
+  atmosphere, composition, visual interpretation, rarity, timing, or access.
+- Do not favor photographs merely because they contain people or appear
+  editorial. Do not penalize photographs merely because they contain no people
+  or appear commercially licensable.
 
 HARD QUALITY GATES:
 - Score technical usability independently from Getty merit.
@@ -559,7 +565,6 @@ def _build_review_user_prompt(
             "photo_id": item.photo_id,
             "title": item.title,
             "description": item.description,
-            "editorial": item.editorial,
         }
         for item in window
     ]
@@ -568,7 +573,8 @@ def _build_review_user_prompt(
         f"The hard technical threshold is {minimum_technical_score} and the hard "
         f"Getty merit threshold is {minimum_getty_score}. "
         "Visible evidence and differentiation must support the decision. "
-        "The following metadata deliberately excludes every initial agency choice:\n"
+        "The following metadata deliberately excludes every initial agency choice "
+        "and every editorial/commercial routing flag:\n"
         + json.dumps(metadata, ensure_ascii=False)
     )
 

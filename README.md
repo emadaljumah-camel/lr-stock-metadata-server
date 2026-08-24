@@ -74,6 +74,11 @@ configured Getty ratio is a non-enforced planning target: weak images are never
 promoted to fill it, and unrelated qualified scenes are not demoted merely
 because another candidate is stronger.
 
+Review decisions are made without the initial agency choice or the
+editorial/commercial routing flag. The same quality gates apply to both usage
+types, and strong commercial imagery can qualify through exceptional visual
+treatment without a quota or lower threshold.
+
 Only one active Lightroom job is tracked at a time. Apply the active job before
 submitting another. Job files are retained for recovery and are not deleted
 automatically.
