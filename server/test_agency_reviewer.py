@@ -11,6 +11,8 @@ from .agency_reviewer import (
     _build_review_system_prompt,
     _build_review_user_prompt,
     _build_windows,
+    _parse_duplicate_confirmation,
+    _parse_global_duplicate_groups,
     review_agency_assignments,
 )
 from .job_models import JobPhotoResult
@@ -30,6 +32,66 @@ def result(photo_id: str, instruction: str, *, editorial: bool = True) -> JobPho
 
 
 class AgencyReviewerTests(unittest.TestCase):
+    def test_duplicate_confirmation_requires_consistent_keep_count(self) -> None:
+        self.assertEqual(
+            _parse_duplicate_confirmation(
+                {
+                    "same_sequence": True,
+                    "maximum_to_keep": 1,
+                    "reason": "same subject and moment",
+                },
+                2,
+            ),
+            (True, 1, "same subject and moment"),
+        )
+        self.assertEqual(
+            _parse_duplicate_confirmation(
+                {
+                    "same_sequence": False,
+                    "maximum_to_keep": 0,
+                    "reason": "different subjects",
+                },
+                2,
+            ),
+            (False, 0, "different subjects"),
+        )
+
+    def test_global_duplicate_groups_expand_to_complete_ranked_decisions(self) -> None:
+        provisional = {
+            "photo-a": AgencyReviewDecision(
+                "photo-a", "getty", 88, 90, True, "strongest"
+            ),
+            "photo-b": AgencyReviewDecision(
+                "photo-b", "getty", 87, 84, True, "variation"
+            ),
+            "photo-c": AgencyReviewDecision(
+                "photo-c", "getty", 86, 82, True, "unrelated"
+            ),
+        }
+
+        decisions = _parse_global_duplicate_groups(
+            {
+                "duplicate_groups": [
+                    {
+                        "sequence_id": "same-scene",
+                        "photo_ids": ["photo-a", "photo-b"],
+                        "maximum_to_keep": 1,
+                        "reason": "same subject and moment",
+                    }
+                ]
+            },
+            ["photo-a", "photo-b", "photo-c"],
+            provisional,
+            2,
+        )
+
+        by_id = {decision.photo_id: decision for decision in decisions}
+        self.assertTrue(by_id["photo-a"].keep_getty)
+        self.assertFalse(by_id["photo-b"].keep_getty)
+        self.assertEqual(by_id["photo-b"].duplicate_of, "photo-a")
+        self.assertTrue(by_id["photo-c"].keep_getty)
+        self.assertTrue(by_id["photo-c"].sequence_id.startswith("unique-"))
+
     def test_windows_overlap_and_cover_all_photos(self) -> None:
         results = [
             result(f"photo-{index}", "agency:adobe_shutterstock")

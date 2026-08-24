@@ -547,11 +547,8 @@ def _call_dedup_model(
     metadata = [
         {
             "photo_id": item.photo_id,
-            "title": item.title,
-            "description": item.description,
             "technical_score": provisional_decisions[item.photo_id].technical_score,
             "getty_score": provisional_decisions[item.photo_id].getty_score,
-            "qualification_reason": provisional_decisions[item.photo_id].reason,
         }
         for item in window
     ]
@@ -593,16 +590,143 @@ def _call_dedup_model(
                 },
                 {"role": "user", "content": content},
             ],
-            max_tokens=3000,
+            max_tokens=8000,
             temperature=0.1,
         )
         raw = _chat_response_text(response)
         if not raw:
             raise ValueError("Agency deduplication model returned an empty response")
         data, _ = _extract_local_json_from_text(raw)
-        return _parse_dedup_decisions(data, [item.photo_id for item in window])
+        proposed = _parse_global_duplicate_groups(
+            data,
+            [item.photo_id for item in window],
+            provisional_decisions,
+            maximum_per_sequence,
+        )
+        return _confirm_global_duplicate_groups(
+            client=client,
+            model=model,
+            candidates=window,
+            preview_paths=preview_paths,
+            provisional_decisions=provisional_decisions,
+            proposed=proposed,
+            maximum_per_sequence=maximum_per_sequence,
+        )
     except Exception as exc:
         raise RuntimeError(f"Agency finalist deduplication failed: {exc}") from exc
+
+
+def _confirm_global_duplicate_groups(
+    *,
+    client,
+    model: str,
+    candidates: list[JobPhotoResult],
+    preview_paths: dict[str, Path],
+    provisional_decisions: dict[str, AgencyReviewDecision],
+    proposed: list[AgencyDedupDecision],
+    maximum_per_sequence: int,
+) -> list[AgencyDedupDecision]:
+    by_id = {item.photo_id: item for item in candidates}
+    order = {item.photo_id: index for index, item in enumerate(candidates)}
+    by_sequence: dict[str, list[str]] = {}
+    for decision in proposed:
+        if not decision.sequence_id.startswith("unique-"):
+            by_sequence.setdefault(decision.sequence_id, []).append(decision.photo_id)
+    final = {decision.photo_id: decision for decision in proposed}
+    for sequence_id, photo_ids in by_sequence.items():
+        if len(photo_ids) < 2:
+            continue
+        same_sequence, maximum_to_keep, reason = _call_duplicate_confirmation_model(
+            client=client,
+            model=model,
+            group=[by_id[photo_id] for photo_id in photo_ids],
+            preview_paths=preview_paths,
+            maximum_per_sequence=maximum_per_sequence,
+        )
+        if not same_sequence:
+            for photo_id in photo_ids:
+                final[photo_id] = AgencyDedupDecision(
+                    photo_id=photo_id,
+                    sequence_id=f"unique-{photo_id}",
+                    keep_getty=True,
+                    duplicate_of=None,
+                    reason=reason,
+                )
+            continue
+        ranked = sorted(
+            photo_ids,
+            key=lambda photo_id: (
+                provisional_decisions[photo_id].getty_score,
+                provisional_decisions[photo_id].technical_score,
+                -order[photo_id],
+            ),
+            reverse=True,
+        )
+        keep = set(ranked[:maximum_to_keep])
+        winner = ranked[0]
+        for photo_id in photo_ids:
+            kept = photo_id in keep
+            final[photo_id] = AgencyDedupDecision(
+                photo_id=photo_id,
+                sequence_id=sequence_id,
+                keep_getty=kept,
+                duplicate_of=None if kept else winner,
+                reason=reason,
+            )
+    return [final[item.photo_id] for item in candidates]
+
+
+def _call_duplicate_confirmation_model(
+    *,
+    client,
+    model: str,
+    group: list[JobPhotoResult],
+    preview_paths: dict[str, Path],
+    maximum_per_sequence: int,
+) -> tuple[bool, int, str]:
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "Verify from scratch whether all supplied photographs belong to "
+                "the same repeated scene, subject, or shooting sequence. Do not "
+                "assume the earlier overview was correct."
+            ),
+        }
+    ]
+    for item in group:
+        path = preview_paths[item.photo_id]
+        resized = create_resized_jpeg(path, path.parent)
+        content.extend(
+            [
+                {"type": "text", "text": f"PHOTO_ID: {item.photo_id}"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{encode_image_to_base64(resized)}"
+                    },
+                },
+            ]
+        )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": _build_duplicate_confirmation_system_prompt(
+                    maximum_per_sequence
+                ),
+            },
+            {"role": "user", "content": content},
+        ],
+        max_tokens=4000,
+        temperature=0.1,
+    )
+    raw = _chat_response_text(response)
+    if not raw:
+        raise ValueError("Duplicate confirmation model returned an empty response")
+    data, _ = _extract_local_json_from_text(raw)
+    return _parse_duplicate_confirmation(data, maximum_per_sequence)
 
 
 def _create_global_contact_sheets(
@@ -675,21 +799,49 @@ DEDUPLICATION RULES:
 - If demoting a duplicate, duplicate_of must identify the stronger supplied frame.
 - Never demote for distribution targets, quotas, or comparison with unrelated work.
 
-Return valid JSON only with one decision for every PHOTO_ID:
+Return valid JSON only. Include only repeated groups; omit every unique image:
 {{
-  "decisions": [
+  "duplicate_groups": [
     {{
-      "photo_id": "photo-id",
       "sequence_id": "short-shared-sequence-label",
-      "keep_getty": true,
-      "duplicate_of": null,
+      "photo_ids": ["photo-id-1", "photo-id-2"],
+      "maximum_to_keep": 1,
       "reason": "short visual duplication reason"
     }}
   ]
 }}
 
-For keep_getty false, duplicate_of must be another supplied PHOTO_ID. Return no
-markdown or extra text.
+maximum_to_keep must be {preferred_per_sequence} for near-duplicates. It may be
+up to {maximum_per_sequence} only when that many frames have materially different
+actions, stories, scales, compositions, atmospheres, or buyer uses. A PHOTO_ID
+may appear in at most one group. Return {{"duplicate_groups": []}} when all
+images are unique. Return no markdown or extra text.
+""".strip()
+
+
+def _build_duplicate_confirmation_system_prompt(maximum_per_sequence: int) -> str:
+    return f"""
+You are verifying one proposed duplicate group using full individual images.
+Judge visible evidence from scratch.
+
+- same_sequence is true only when all supplied photographs show the same subject,
+  scene, moment, or clearly continuous shooting sequence.
+- Different subjects or unrelated scenes must return false, even when they share
+  a location, color palette, or broad theme.
+- When true, maximum_to_keep must be 1 for near-duplicates. It may be 2 only when
+  both provide materially different actions, stories, scales, compositions,
+  atmospheres, or buyer uses.
+- maximum_to_keep cannot exceed {maximum_per_sequence}.
+
+Return valid JSON only:
+{{
+  "same_sequence": true,
+  "maximum_to_keep": 1,
+  "reason": "short visible-evidence explanation"
+}}
+
+When same_sequence is false, return maximum_to_keep as 0. Return no markdown or
+extra text.
 """.strip()
 
 
@@ -894,6 +1046,104 @@ def _parse_decisions(data: dict, expected_ids: list[str]) -> list[AgencyReviewDe
         missing = sorted(set(expected_ids) - seen)
         raise ValueError("Agency review omitted photo IDs: " + ", ".join(missing))
     return decisions
+
+
+def _parse_global_duplicate_groups(
+    data: dict,
+    expected_ids: list[str],
+    provisional: dict[str, AgencyReviewDecision],
+    maximum_per_sequence: int,
+) -> list[AgencyDedupDecision]:
+    raw_groups = data.get("duplicate_groups")
+    if not isinstance(raw_groups, list):
+        raise ValueError("Global deduplication response must contain duplicate_groups")
+    expected = set(expected_ids)
+    order = {photo_id: index for index, photo_id in enumerate(expected_ids)}
+    assigned: set[str] = set()
+    decisions: dict[str, AgencyDedupDecision] = {}
+    for raw in raw_groups:
+        if not isinstance(raw, dict):
+            raise ValueError("Each duplicate group must be an object")
+        sequence_id = str(raw.get("sequence_id") or "").strip()
+        if not sequence_id:
+            raise ValueError("Duplicate group sequence_id is missing")
+        raw_photo_ids = raw.get("photo_ids")
+        if not isinstance(raw_photo_ids, list):
+            raise ValueError(f"photo_ids must be an array for {sequence_id}")
+        photo_ids = [str(value).strip() for value in raw_photo_ids]
+        if len(photo_ids) < 2 or len(photo_ids) != len(set(photo_ids)):
+            raise ValueError(f"Duplicate group must contain unique photo IDs: {sequence_id}")
+        invalid = set(photo_ids) - expected
+        if invalid:
+            raise ValueError(
+                f"Unexpected duplicate photo IDs for {sequence_id}: "
+                + ", ".join(sorted(invalid))
+            )
+        overlap = set(photo_ids) & assigned
+        if overlap:
+            raise ValueError(
+                "Photo IDs cannot appear in multiple duplicate groups: "
+                + ", ".join(sorted(overlap))
+            )
+        maximum_to_keep = raw.get("maximum_to_keep")
+        if isinstance(maximum_to_keep, bool) or not isinstance(maximum_to_keep, int):
+            raise ValueError(f"maximum_to_keep must be an integer for {sequence_id}")
+        if not 1 <= maximum_to_keep <= maximum_per_sequence:
+            raise ValueError(f"Invalid maximum_to_keep for {sequence_id}")
+        reason = str(raw.get("reason") or "").strip()
+        if not reason:
+            raise ValueError(f"Duplicate group reason is missing for {sequence_id}")
+        ranked = sorted(
+            photo_ids,
+            key=lambda photo_id: (
+                provisional[photo_id].getty_score,
+                provisional[photo_id].technical_score,
+                -order[photo_id],
+            ),
+            reverse=True,
+        )
+        keep = set(ranked[:maximum_to_keep])
+        winner = ranked[0]
+        for photo_id in photo_ids:
+            kept = photo_id in keep
+            decisions[photo_id] = AgencyDedupDecision(
+                photo_id=photo_id,
+                sequence_id=sequence_id,
+                keep_getty=kept,
+                duplicate_of=None if kept else winner,
+                reason=reason,
+            )
+        assigned.update(photo_ids)
+    for photo_id in expected_ids:
+        if photo_id not in decisions:
+            decisions[photo_id] = AgencyDedupDecision(
+                photo_id=photo_id,
+                sequence_id=f"unique-{photo_id}",
+                keep_getty=True,
+                duplicate_of=None,
+                reason="No repeated sequence identified in the global review",
+            )
+    return [decisions[photo_id] for photo_id in expected_ids]
+
+
+def _parse_duplicate_confirmation(
+    data: dict, maximum_per_sequence: int
+) -> tuple[bool, int, str]:
+    same_sequence = data.get("same_sequence")
+    if not isinstance(same_sequence, bool):
+        raise ValueError("same_sequence must be true/false")
+    maximum_to_keep = data.get("maximum_to_keep")
+    if isinstance(maximum_to_keep, bool) or not isinstance(maximum_to_keep, int):
+        raise ValueError("maximum_to_keep must be an integer")
+    if same_sequence:
+        if not 1 <= maximum_to_keep <= maximum_per_sequence:
+            raise ValueError("Invalid confirmed maximum_to_keep")
+    elif maximum_to_keep != 0:
+        raise ValueError("maximum_to_keep must be 0 for unrelated photographs")
+    reason = str(data.get("reason") or "").strip()
+    if not reason:
+        raise ValueError("Duplicate confirmation reason is missing")
+    return same_sequence, maximum_to_keep, reason
 
 
 def _parse_dedup_decisions(

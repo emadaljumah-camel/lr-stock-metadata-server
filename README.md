@@ -87,7 +87,9 @@ treatment. This is a promotion opportunity, not a commercial quota.
 
 All qualified Getty candidates are shown together in labeled contact sheets for
 one global sequence review. This lets distant frames from the same subject or
-scene be grouped before the configured per-sequence maximum is enforced.
+scene be grouped before the configured per-sequence maximum is enforced. Every
+proposed repeated group is then confirmed from the full individual images before
+any demotion is applied.
 
 Only one active Lightroom job is tracked at a time. Apply the active job before
 submitting another. Job files are retained for recovery and are not deleted
