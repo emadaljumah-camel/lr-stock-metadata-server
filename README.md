@@ -66,6 +66,14 @@ or demote Getty selections while preserving editorial/commercial usage. Review
 progress is stored in `agency_review.json`; `result.json` is written only after
 the comparative review succeeds.
 
+Getty candidates must independently pass configured technical-quality and
+Getty-merit thresholds. A finalist pass then removes only true visual/sequence
+duplicates, preferring one representative and permitting a second only when it
+has a materially different story, action, composition, or buyer use. The
+configured Getty ratio is a non-enforced planning target: weak images are never
+promoted to fill it, and unrelated qualified scenes are not demoted merely
+because another candidate is stronger.
+
 Only one active Lightroom job is tracked at a time. Apply the active job before
 submitting another. Job files are retained for recovery and are not deleted
 automatically.

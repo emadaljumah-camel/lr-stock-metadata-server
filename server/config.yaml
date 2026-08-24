@@ -33,6 +33,11 @@ metadata:
     enabled: true
     batch_size: 10
     batch_overlap: 2
+    minimum_technical_score: 75
+    minimum_getty_score: 73
+    preferred_getty_per_sequence: 1
+    maximum_getty_per_sequence: 2
+    target_getty_ratio: 0.20
 
 geocoding:
   reverse_url: "https://nominatim.openstreetmap.org/reverse"
