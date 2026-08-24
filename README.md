@@ -59,6 +59,13 @@ previously running job becomes `interrupted` and can be resumed without
 regenerating completed photos. Create, upload, and run requests are idempotent,
 so interrupted submissions are also resumable.
 
+After per-photo metadata generation, the server performs a comparative agency
+review over overlapping groups of neighboring photos. It starts each routing
+decision from scratch, so it can promote Adobe/Shutterstock selections to Getty
+or demote Getty selections while preserving editorial/commercial usage. Review
+progress is stored in `agency_review.json`; `result.json` is written only after
+the comparative review succeeds.
+
 Only one active Lightroom job is tracked at a time. Apply the active job before
 submitting another. Job files are retained for recovery and are not deleted
 automatically.

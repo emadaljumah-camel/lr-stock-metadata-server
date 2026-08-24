@@ -29,6 +29,10 @@ metadata:
     strong_getty_threshold: 88
     possible_getty_threshold: 73
     adobe_shutterstock_threshold: 58
+  agency_review:
+    enabled: true
+    batch_size: 10
+    batch_overlap: 2
 
 geocoding:
   reverse_url: "https://nominatim.openstreetmap.org/reverse"

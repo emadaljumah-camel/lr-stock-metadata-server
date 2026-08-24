@@ -62,6 +62,10 @@ class JobStore:
             self._write_json(directory / "uploads.json", {})
             self._write_json(directory / "checkpoint.json", {})
             self._write_json(
+                directory / "agency_review.json",
+                {"schema_version": 1, "windows": {}},
+            )
+            self._write_json(
                 directory / "status.json",
                 {
                     "job_id": job_id,
@@ -181,6 +185,16 @@ class JobStore:
                 )
             payload[result.photo_id] = serialized
             self._write_json(path, payload)
+
+    def load_agency_review(self, job_id: str) -> dict[str, Any]:
+        path = self.job_dir(job_id) / "agency_review.json"
+        if not path.is_file():
+            return {"schema_version": 1, "windows": {}}
+        return self._read_json(path)
+
+    def save_agency_review(self, job_id: str, review: dict[str, Any]) -> None:
+        with _STORE_LOCK:
+            self._write_json(self.job_dir(job_id) / "agency_review.json", review)
 
     def save_result(self, result: JobResult) -> None:
         expected = [photo.photo_id for photo in self.get_request(result.job_id).photos]

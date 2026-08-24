@@ -4,6 +4,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
+from .agency_reviewer import review_agency_assignments
 from .job_models import JobPhotoResult, JobProgress, JobResult
 from .job_store import JobStore
 from .photo_metadata_adapter import generate_metadata_for_image
@@ -101,6 +102,40 @@ class JobRunner:
             completed[photo.photo_id] = result
 
         ordered = [completed[photo.photo_id] for photo in request.photos]
+        self.store.set_status(
+            job_id,
+            "running",
+            JobProgress(
+                stage="reviewing_agencies",
+                processed_photos=0,
+                total_photos=total,
+            ),
+            errors=[],
+        )
+
+        def report_review_progress(processed: int, photo_id: str | None) -> None:
+            self.store.set_status(
+                job_id,
+                "running",
+                JobProgress(
+                    stage="reviewing_agencies",
+                    processed_photos=processed,
+                    total_photos=total,
+                    current_photo_id=photo_id,
+                ),
+                errors=[],
+            )
+
+        ordered = review_agency_assignments(
+            results=ordered,
+            preview_paths={
+                photo.photo_id: self.store.preview_path(job_id, photo.photo_id)
+                for photo in request.photos
+            },
+            checkpoint=self.store.load_agency_review(job_id),
+            save_checkpoint=lambda review: self.store.save_agency_review(job_id, review),
+            progress=report_review_progress,
+        )
         self.store.save_result(JobResult(job_id=job_id, results=ordered))
         self.store.set_status(
             job_id,
@@ -112,4 +147,3 @@ class JobRunner:
             resumable=False,
         )
         self.logger.info("job_completed job_id=%s photos=%s", job_id, total)
-

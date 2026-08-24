@@ -98,12 +98,19 @@ class JobRunnerTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_process_checkpoints_and_completes_job(self) -> None:
-        with patch("server.job_runner.generate_metadata_for_image", return_value=METADATA):
+        with (
+            patch("server.job_runner.generate_metadata_for_image", return_value=METADATA),
+            patch(
+                "server.job_runner.review_agency_assignments",
+                side_effect=lambda **kwargs: kwargs["results"],
+            ) as review,
+        ):
             self.runner.process(self.job_id)
 
         result = self.store.load_result(self.job_id)
         self.assertEqual(result.results[0].photo_id, "photo-1")
         self.assertEqual(result.results[0].title, "Test title")
+        review.assert_called_once()
         self.assertEqual(self.store.get_status(self.job_id)["status"], "completed")
 
 
