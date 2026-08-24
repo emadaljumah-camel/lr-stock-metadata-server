@@ -79,6 +79,16 @@ editorial/commercial routing flag. The same quality gates apply to both usage
 types, and strong commercial imagery can qualify through exceptional visual
 treatment without a quota or lower threshold.
 
+Commercial images rejected by the mixed-content review receive a recovery pass
+only when their preliminary technical score is at least 82 and Getty merit is at
+least 65. Recovery promotion then requires a fresh technical score of at least
+82 and Getty merit of at least 75, plus visibly distinctive premium-commercial
+treatment. This is a promotion opportunity, not a commercial quota.
+
+All qualified Getty candidates are shown together in labeled contact sheets for
+one global sequence review. This lets distant frames from the same subject or
+scene be grouped before the configured per-sequence maximum is enforced.
+
 Only one active Lightroom job is tracked at a time. Apply the active job before
 submitting another. Job files are retained for recovery and are not deleted
 automatically.

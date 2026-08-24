@@ -152,6 +152,88 @@ class AgencyReviewerTests(unittest.TestCase):
 
         self.assertEqual(reviewed[0].agency_instruction, "agency:shutterstock_editorial")
 
+    def test_premium_commercial_recovery_promotes_prefiltered_candidate(self) -> None:
+        results = [
+            result("photo-premium", "agency:adobe_shutterstock", editorial=False),
+            result("photo-routine", "agency:adobe_shutterstock", editorial=False),
+        ]
+        first_pass = [
+            AgencyReviewDecision(
+                "photo-premium", "adobe_shutterstock", 84, 68, False, "near miss"
+            ),
+            AgencyReviewDecision(
+                "photo-routine", "adobe_shutterstock", 84, 64, False, "routine"
+            ),
+        ]
+        recovery = [
+            AgencyReviewDecision(
+                "photo-premium",
+                "getty",
+                85,
+                78,
+                True,
+                "exceptional graphic commercial treatment",
+            )
+        ]
+        saved: list[dict] = []
+
+        with (
+            patch(
+                "server.agency_reviewer._call_review_model",
+                return_value=first_pass,
+            ),
+            patch(
+                "server.agency_reviewer._call_commercial_recovery_model",
+                return_value=recovery,
+            ) as recovery_call,
+        ):
+            reviewed = review_agency_assignments(
+                results=results,
+                preview_paths={item.photo_id: Path("unused.jpg") for item in results},
+                checkpoint={},
+                save_checkpoint=lambda state: saved.append(state.copy()),
+            )
+
+        recovery_call.assert_called_once()
+        self.assertEqual(reviewed[0].agency_instruction, "agency:getty_commercial")
+        self.assertEqual(reviewed[1].agency_instruction, "agency:adobe_shutterstock")
+        self.assertEqual(saved[-1]["summary"]["commercial_recovery_candidates"], 1)
+        self.assertEqual(saved[-1]["summary"]["commercial_recovery_promotions"], 1)
+
+    def test_premium_commercial_recovery_cannot_bypass_hard_gates(self) -> None:
+        results = [
+            result("photo-borderline", "agency:adobe_shutterstock", editorial=False)
+        ]
+        first_pass = [
+            AgencyReviewDecision(
+                "photo-borderline", "adobe_shutterstock", 84, 68, False, "near miss"
+            )
+        ]
+        recovery = [
+            AgencyReviewDecision(
+                "photo-borderline", "getty", 81, 90, True, "visually unusual"
+            )
+        ]
+
+        with (
+            patch(
+                "server.agency_reviewer._call_review_model",
+                return_value=first_pass,
+            ),
+            patch(
+                "server.agency_reviewer._call_commercial_recovery_model",
+                return_value=recovery,
+            ),
+        ):
+            reviewed = review_agency_assignments(
+                results=results,
+                preview_paths={"photo-borderline": Path("unused.jpg")},
+                checkpoint={},
+                save_checkpoint=lambda state: None,
+            )
+
+        self.assertEqual(reviewed[0].agency_instruction, "agency:adobe_shutterstock")
+
     def test_technically_weak_photo_is_not_promoted(self) -> None:
         results = [result("photo-soft", "agency:shutterstock_editorial")]
         saved: list[dict] = []
@@ -194,7 +276,10 @@ class AgencyReviewerTests(unittest.TestCase):
 
         with (
             patch("server.agency_reviewer._call_review_model", return_value=first_pass),
-            patch("server.agency_reviewer._call_dedup_model", return_value=finalist_pass),
+            patch(
+                "server.agency_reviewer._call_dedup_model",
+                return_value=finalist_pass,
+            ),
         ):
             reviewed = review_agency_assignments(
                 results=results,
@@ -263,7 +348,10 @@ class AgencyReviewerTests(unittest.TestCase):
 
         with (
             patch("server.agency_reviewer._call_review_model", return_value=first_pass),
-            patch("server.agency_reviewer._call_dedup_model", return_value=finalist_pass),
+            patch(
+                "server.agency_reviewer._call_dedup_model",
+                return_value=finalist_pass,
+            ) as finalist_call,
         ):
             reviewed = review_agency_assignments(
                 results=results,
@@ -279,6 +367,11 @@ class AgencyReviewerTests(unittest.TestCase):
                 "agency:getty_editorial",
                 "agency:shutterstock_editorial",
             ],
+        )
+        finalist_call.assert_called_once()
+        self.assertEqual(
+            [item.photo_id for item in finalist_call.call_args.kwargs["window"]],
+            ["photo-a", "photo-b", "photo-c"],
         )
 
     def test_completed_review_windows_are_reused(self) -> None:

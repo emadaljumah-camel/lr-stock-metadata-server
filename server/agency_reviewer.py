@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+from PIL import Image, ImageDraw, ImageFont
+
 from .config import int_setting, setting
 from .job_models import JobPhotoResult
 from .photo_metadata_adapter import (
@@ -21,7 +23,7 @@ from .photo_metadata_adapter import (
 )
 
 
-AGENCY_REVIEW_SCHEMA_VERSION = 3
+AGENCY_REVIEW_SCHEMA_VERSION = 4
 
 
 def _bool_setting(path: str, default: bool, *env_names: str) -> bool:
@@ -145,6 +147,44 @@ def review_agency_assignments(
             100,
         ),
     )
+    commercial_recovery_enabled = _bool_setting(
+        "metadata.agency_review.commercial_recovery.enabled",
+        True,
+        "PHOTO_METADATA_COMMERCIAL_RECOVERY_ENABLED",
+    )
+    commercial_recovery_minimum_technical_score = max(
+        minimum_technical_score,
+        min(
+            int_setting(
+                "metadata.agency_review.commercial_recovery.minimum_technical_score",
+                82,
+                "PHOTO_METADATA_COMMERCIAL_RECOVERY_MINIMUM_TECHNICAL_SCORE",
+            ),
+            100,
+        ),
+    )
+    commercial_recovery_preliminary_getty_score = max(
+        0,
+        min(
+            int_setting(
+                "metadata.agency_review.commercial_recovery.preliminary_getty_score",
+                65,
+                "PHOTO_METADATA_COMMERCIAL_RECOVERY_PRELIMINARY_GETTY_SCORE",
+            ),
+            100,
+        ),
+    )
+    commercial_recovery_minimum_getty_score = max(
+        minimum_getty_score,
+        min(
+            int_setting(
+                "metadata.agency_review.commercial_recovery.minimum_getty_score",
+                75,
+                "PHOTO_METADATA_COMMERCIAL_RECOVERY_MINIMUM_GETTY_SCORE",
+            ),
+            100,
+        ),
+    )
     preferred_per_sequence = max(
         1,
         int_setting(
@@ -229,6 +269,63 @@ def review_agency_assignments(
         minimum_technical_score=minimum_technical_score,
         minimum_getty_score=minimum_getty_score,
     )
+    commercial_recovery_pool = [
+        item
+        for item in results
+        if commercial_recovery_enabled
+        and not item.editorial
+        and provisional_decisions[item.photo_id].selected_agency
+        == "adobe_shutterstock"
+        and provisional_decisions[item.photo_id].technical_score
+        >= commercial_recovery_minimum_technical_score
+        and provisional_decisions[item.photo_id].getty_score
+        >= commercial_recovery_preliminary_getty_score
+    ]
+    commercial_promotions: set[str] = set()
+    if commercial_recovery_pool:
+        recovery_windows = _build_windows(commercial_recovery_pool, batch_size, overlap)
+        state.setdefault("commercial_recovery_windows", {})
+        for index, window in enumerate(recovery_windows, start=1):
+            window_id = f"commercial-window-{index:04d}"
+            expected_ids = [item.photo_id for item in window]
+            saved = state["commercial_recovery_windows"].get(window_id)
+            if _saved_window_is_valid(saved, expected_ids):
+                continue
+            if client is None:
+                base_url = str(
+                    setting(
+                        "models.lm_studio_base_url",
+                        DEFAULT_LM_STUDIO_BASE_URL,
+                        "LM_STUDIO_BASE_URL",
+                    )
+                ).strip()
+                client = create_lm_studio_client(base_url)
+            decisions = _call_commercial_recovery_model(
+                client=client,
+                model=model,
+                window=window,
+                preview_paths=preview_paths,
+                minimum_technical_score=(
+                    commercial_recovery_minimum_technical_score
+                ),
+                minimum_getty_score=commercial_recovery_minimum_getty_score,
+            )
+            state["commercial_recovery_windows"][window_id] = {
+                "photo_ids": expected_ids,
+                "decisions": [decision.to_dict() for decision in decisions],
+            }
+            save_checkpoint(state)
+        provisional_decisions, commercial_promotions = (
+            _apply_commercial_recovery_decisions(
+                provisional_decisions,
+                commercial_recovery_pool,
+                state,
+                minimum_technical_score=(
+                    commercial_recovery_minimum_technical_score
+                ),
+                minimum_getty_score=commercial_recovery_minimum_getty_score,
+            )
+        )
     candidates = [
         by_id[item.photo_id]
         for item in results
@@ -236,14 +333,9 @@ def review_agency_assignments(
     ]
     final_decisions = provisional_decisions.copy()
     if len(candidates) > 1:
-        finalist_windows = _build_windows(candidates, batch_size, overlap)
-        state.setdefault("finalist_windows", {})
-        for index, window in enumerate(finalist_windows, start=1):
-            window_id = f"finalist-window-{index:04d}"
-            expected_ids = [item.photo_id for item in window]
-            saved = state["finalist_windows"].get(window_id)
-            if _saved_dedup_window_is_valid(saved, expected_ids):
-                continue
+        expected_ids = [item.photo_id for item in candidates]
+        saved = state.get("global_finalist")
+        if not _saved_dedup_window_is_valid(saved, expected_ids):
             if client is None:
                 base_url = str(
                     setting(
@@ -256,13 +348,13 @@ def review_agency_assignments(
             decisions = _call_dedup_model(
                 client=client,
                 model=model,
-                window=window,
+                window=candidates,
                 preview_paths=preview_paths,
                 provisional_decisions=provisional_decisions,
                 preferred_per_sequence=preferred_per_sequence,
                 maximum_per_sequence=maximum_per_sequence,
             )
-            state["finalist_windows"][window_id] = {
+            state["global_finalist"] = {
                 "photo_ids": expected_ids,
                 "decisions": [decision.to_dict() for decision in decisions],
             }
@@ -285,6 +377,8 @@ def review_agency_assignments(
         "minimum_technical_score": minimum_technical_score,
         "minimum_getty_score": minimum_getty_score,
         "qualified_candidates": len(candidates),
+        "commercial_recovery_candidates": len(commercial_recovery_pool),
+        "commercial_recovery_promotions": len(commercial_promotions),
         "final_getty_count": final_getty_count,
         "final_getty_ratio": round(final_getty_count / len(results), 4),
         "target_getty_ratio": target_getty_ratio,
@@ -382,6 +476,64 @@ def _call_review_model(
         raise RuntimeError(f"Agency review failed: {exc}") from exc
 
 
+def _call_commercial_recovery_model(
+    *,
+    client,
+    model: str,
+    window: list[JobPhotoResult],
+    preview_paths: dict[str, Path],
+    minimum_technical_score: int,
+    minimum_getty_score: int,
+) -> list[AgencyReviewDecision]:
+    content: list[dict] = [
+        {
+            "type": "text",
+            "text": _build_commercial_recovery_user_prompt(
+                window,
+                minimum_technical_score,
+                minimum_getty_score,
+            ),
+        }
+    ]
+    for item in window:
+        path = preview_paths[item.photo_id]
+        resized = create_resized_jpeg(path, path.parent)
+        content.extend(
+            [
+                {"type": "text", "text": f"PHOTO_ID: {item.photo_id}"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{encode_image_to_base64(resized)}"
+                    },
+                },
+            ]
+        )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": _build_commercial_recovery_system_prompt(
+                        minimum_technical_score,
+                        minimum_getty_score,
+                    ),
+                },
+                {"role": "user", "content": content},
+            ],
+            max_tokens=3000,
+            temperature=0.1,
+        )
+        raw = _chat_response_text(response)
+        if not raw:
+            raise ValueError("Commercial recovery model returned an empty response")
+        data, _ = _extract_local_json_from_text(raw)
+        return _parse_decisions(data, [item.photo_id for item in window])
+    except Exception as exc:
+        raise RuntimeError(f"Commercial agency recovery failed: {exc}") from exc
+
+
 def _call_dedup_model(
     *,
     client,
@@ -407,22 +559,23 @@ def _call_dedup_model(
         {
             "type": "text",
             "text": (
-                "Identify only true visual/scene duplicates among these already "
-                "qualified Getty candidates:\n"
+                "Identify only true visual/scene duplicates across this complete "
+                "set of already qualified Getty candidates. Each contact-sheet "
+                "thumbnail is labeled with its PHOTO_ID:\n"
                 + json.dumps(metadata, ensure_ascii=False)
             ),
         }
     ]
-    for item in window:
-        path = preview_paths[item.photo_id]
-        resized = create_resized_jpeg(path, path.parent)
+    for sheet_index, sheet_path in enumerate(
+        _create_global_contact_sheets(window, preview_paths), start=1
+    ):
         content.extend(
             [
-                {"type": "text", "text": f"PHOTO_ID: {item.photo_id}"},
+                {"type": "text", "text": f"CONTACT_SHEET: {sheet_index}"},
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": f"data:image/jpeg;base64,{encode_image_to_base64(resized)}"
+                        "url": f"data:image/jpeg;base64,{encode_image_to_base64(sheet_path)}"
                     },
                 },
             ]
@@ -450,6 +603,56 @@ def _call_dedup_model(
         return _parse_dedup_decisions(data, [item.photo_id for item in window])
     except Exception as exc:
         raise RuntimeError(f"Agency finalist deduplication failed: {exc}") from exc
+
+
+def _create_global_contact_sheets(
+    candidates: list[JobPhotoResult],
+    preview_paths: dict[str, Path],
+    *,
+    maximum_per_sheet: int = 30,
+) -> list[Path]:
+    columns = 5
+    cell_width = 320
+    image_height = 210
+    label_height = 34
+    output_folder = next(iter(preview_paths.values())).parent / "_resized_for_ai"
+    output_folder.mkdir(exist_ok=True)
+    font = ImageFont.load_default(size=22)
+    paths: list[Path] = []
+    for sheet_index, start in enumerate(
+        range(0, len(candidates), maximum_per_sheet), start=1
+    ):
+        group = candidates[start : start + maximum_per_sheet]
+        rows = (len(group) + columns - 1) // columns
+        sheet = Image.new(
+            "RGB", (columns * cell_width, rows * (image_height + label_height)), "white"
+        )
+        draw = ImageDraw.Draw(sheet)
+        for index, item in enumerate(group):
+            column = index % columns
+            row = index // columns
+            left = column * cell_width
+            top = row * (image_height + label_height)
+            with Image.open(preview_paths[item.photo_id]) as source:
+                thumbnail = source.convert("RGB")
+                thumbnail.thumbnail((cell_width, image_height), Image.LANCZOS)
+                image_left = left + (cell_width - thumbnail.width) // 2
+                image_top = top + (image_height - thumbnail.height) // 2
+                sheet.paste(thumbnail, (image_left, image_top))
+            draw.rectangle(
+                (left, top + image_height, left + cell_width, top + image_height + label_height),
+                fill="white",
+            )
+            draw.text(
+                (left + 8, top + image_height + 8),
+                item.photo_id,
+                fill="black",
+                font=font,
+            )
+        path = output_folder / f"agency_global_finalists_{sheet_index:02d}.jpg"
+        sheet.save(path, "JPEG", quality=90)
+        paths.append(path)
+    return paths
 
 
 def _build_dedup_system_prompt(
@@ -553,6 +756,74 @@ technical_score and getty_score must be integers from 0 to 100.
 selected_agency must be exactly "getty" or "adobe_shutterstock". Return no
 markdown or extra text.
 """.strip()
+
+
+def _build_commercial_recovery_system_prompt(
+    minimum_technical_score: int,
+    minimum_getty_score: int,
+) -> str:
+    return f"""
+You are performing a premium-commercial recovery review for stock-agency
+routing. Every supplied photograph is commercially licensable and was not
+selected for Getty in a broader mixed-content review. Reconsider each image from
+scratch against premium commercial photography standards.
+
+PREMIUM COMMERCIAL GETTY GATE:
+- Technical execution must be exceptional and score at least
+  {minimum_technical_score}: sharp focus, controlled exposure, clean processing,
+  deliberate composition, and professional usability.
+- Getty merit must score at least {minimum_getty_score}.
+- The image must offer a memorable visual interpretation, exceptional atmosphere
+  or light, rare timing or access, unusually strong graphic composition, or a
+  polished and distinctive commercial concept.
+- Clear buyer utility supports a decision but is never sufficient by itself.
+- Attractive, clean, or useful commodity stock remains Adobe/Shutterstock when
+  it is routine, generic, easily repeated, or visually interchangeable.
+- Do not require people, documentary narrative, or editorial context.
+- Do not impose a quota and never raise a score to improve distribution.
+- Judge the image itself. Titles and descriptions are supporting context only.
+
+Return one decision for every PHOTO_ID as valid JSON only:
+{{
+  "decisions": [
+    {{
+      "photo_id": "photo-id",
+      "selected_agency": "getty",
+      "technical_score": 0,
+      "getty_score": 0,
+      "differentiated": true,
+      "reason": "short visible-evidence reason"
+    }}
+  ]
+}}
+
+technical_score and getty_score must be integers from 0 to 100.
+selected_agency must be exactly "getty" or "adobe_shutterstock". Return no
+markdown or extra text.
+""".strip()
+
+
+def _build_commercial_recovery_user_prompt(
+    window: list[JobPhotoResult],
+    minimum_technical_score: int,
+    minimum_getty_score: int,
+) -> str:
+    metadata = [
+        {
+            "photo_id": item.photo_id,
+            "title": item.title,
+            "description": item.description,
+        }
+        for item in window
+    ]
+    return (
+        "Compare these premium-commercial candidates and reassess each one "
+        "independently. "
+        f"The hard technical threshold is {minimum_technical_score} and the hard "
+        f"Getty merit threshold is {minimum_getty_score}. The metadata excludes "
+        "all prior agency choices and scores:\n"
+        + json.dumps(metadata, ensure_ascii=False)
+    )
 
 
 def _build_review_user_prompt(
@@ -697,7 +968,9 @@ def _apply_dedup_decisions(
         if left_root != right_root:
             parent[right_root] = left_root
 
-    for saved in state.get("finalist_windows", {}).values():
+    saved_global = state.get("global_finalist")
+    saved_decisions = [saved_global] if isinstance(saved_global, dict) else []
+    for saved in saved_decisions:
         expected_ids = saved.get("photo_ids", [])
         parsed = _parse_dedup_decisions(
             {"decisions": saved.get("decisions", [])}, expected_ids
@@ -760,6 +1033,61 @@ def _apply_dedup_decisions(
                 reason=f"{duplicate_reason}; retained {winner}"[:500],
             )
     return final
+
+
+def _apply_commercial_recovery_decisions(
+    provisional: dict[str, AgencyReviewDecision],
+    recovery_pool: list[JobPhotoResult],
+    state: dict,
+    *,
+    minimum_technical_score: int,
+    minimum_getty_score: int,
+) -> tuple[dict[str, AgencyReviewDecision], set[str]]:
+    pool_ids = {item.photo_id for item in recovery_pool}
+    collected: dict[str, list[AgencyReviewDecision]] = {
+        photo_id: [] for photo_id in pool_ids
+    }
+    for saved in state.get("commercial_recovery_windows", {}).values():
+        expected = saved.get("photo_ids", [])
+        for decision in _parse_decisions(
+            {"decisions": saved.get("decisions", [])}, expected
+        ):
+            if decision.photo_id in collected:
+                collected[decision.photo_id].append(decision)
+
+    final = provisional.copy()
+    promoted: set[str] = set()
+    for item in recovery_pool:
+        decisions = collected[item.photo_id]
+        if not decisions:
+            raise RuntimeError(
+                f"No commercial recovery decision for {item.photo_id}"
+            )
+        technical_score = round(
+            sum(decision.technical_score for decision in decisions) / len(decisions)
+        )
+        qualifying = [
+            decision
+            for decision in decisions
+            if decision.selected_agency == "getty"
+            and decision.technical_score >= minimum_technical_score
+            and decision.getty_score >= minimum_getty_score
+            and decision.differentiated
+        ]
+        if technical_score < minimum_technical_score or not qualifying:
+            continue
+        score = max(decision.getty_score for decision in qualifying)
+        reasons = list(dict.fromkeys(decision.reason for decision in qualifying))
+        final[item.photo_id] = AgencyReviewDecision(
+            photo_id=item.photo_id,
+            selected_agency="getty",
+            technical_score=technical_score,
+            getty_score=score,
+            differentiated=True,
+            reason=("premium commercial recovery: " + " | ".join(reasons))[:500],
+        )
+        promoted.add(item.photo_id)
+    return final, promoted
 
 
 def _aggregate_decisions(
@@ -849,6 +1177,16 @@ def _normalize_checkpoint(checkpoint: dict) -> dict:
     return {
         "schema_version": AGENCY_REVIEW_SCHEMA_VERSION,
         "windows": windows,
+        **(
+            {"commercial_recovery_windows": checkpoint["commercial_recovery_windows"]}
+            if isinstance(checkpoint.get("commercial_recovery_windows"), dict)
+            else {}
+        ),
+        **(
+            {"global_finalist": checkpoint["global_finalist"]}
+            if isinstance(checkpoint.get("global_finalist"), dict)
+            else {}
+        ),
         **(
             {"finalist_windows": checkpoint["finalist_windows"]}
             if isinstance(checkpoint.get("finalist_windows"), dict)

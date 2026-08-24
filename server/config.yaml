@@ -38,6 +38,11 @@ metadata:
     preferred_getty_per_sequence: 1
     maximum_getty_per_sequence: 2
     target_getty_ratio: 0.20
+    commercial_recovery:
+      enabled: true
+      preliminary_getty_score: 65
+      minimum_technical_score: 82
+      minimum_getty_score: 75
 
 geocoding:
   reverse_url: "https://nominatim.openstreetmap.org/reverse"
