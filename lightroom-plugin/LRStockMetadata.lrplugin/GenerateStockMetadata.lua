@@ -42,28 +42,52 @@ local function hasExistingMetadata(photo)
     return getMeta(photo, "title") ~= "" or getMeta(photo, "caption") ~= "" or #(photo:getRawMetadata("keywords") or {}) > 0
 end
 
-local function exportPreview(photo, folder)
+local function exportKey(photo, fallback)
+    if photo.localIdentifier ~= nil then
+        return "local-" .. tostring(photo.localIdentifier)
+    end
+    local uuid = getMeta(photo, "uuid")
+    if uuid ~= "" then
+        return "uuid-" .. uuid
+    end
+    return "position-" .. tostring(fallback)
+end
+
+local function exportPreviews(photos, folder, progress)
     local settings = {
         LR_export_destinationType = "specificFolder",
         LR_export_destinationPathPrefix = folder,
         LR_format = "JPEG",
         LR_jpeg_quality = 0.80,
         LR_size_doConstrain = true,
-        LR_size_maxHeight = 1600,
-        LR_size_maxWidth = 1600,
+        LR_size_maxHeight = 1200,
+        LR_size_maxWidth = 1200,
         LR_size_resizeType = "wh",
         LR_collisionHandling = "rename",
+        LR_renamingTokensOn = true,
+        LR_initialSequenceNumber = 1,
+        LR_tokens = "lr-stock-metadata-{{naming_sequenceNumber_5Digits}}",
         LR_minimizeEmbeddedMetadata = false,
         LR_removeLocationMetadata = false,
         LR_embeddedMetadataOption = "all",
     }
-    local session = LrExportSession { photosToExport = { photo }, exportSettings = settings }
-    for _, rendition in session:renditions { stopIfCanceled = true } do
+    local session = LrExportSession { photosToExport = photos, exportSettings = settings }
+    local previews = {}
+    local rendered = 0
+    for _, rendition in session:renditions {
+        progressScope = progress,
+        stopIfCanceled = true,
+    } do
+        if progress:isCanceled() then return nil, "Export canceled" end
         local success, pathOrMessage = rendition:waitForRender()
-        if success then return pathOrMessage end
-        return nil, pathOrMessage
+        if not success then return nil, pathOrMessage end
+        rendered = rendered + 1
+        local key = exportKey(rendition.photo, rendered)
+        if previews[key] then return nil, "Duplicate preview photo" end
+        previews[key] = pathOrMessage
     end
-    return nil, "No rendition created"
+    if rendered ~= #photos then return nil, "Not every preview was rendered" end
+    return previews
 end
 
 local function buildContext(photo)
@@ -132,6 +156,7 @@ LrTasks.startAsyncTask(function()
         server_photos = {},
     }
     local skipped = 0
+    local queued = {}
     for index, photo in ipairs(photos) do
         if progress:isCanceled() then break end
         progress:setPortionComplete(index - 1, #photos)
@@ -139,36 +164,52 @@ LrTasks.startAsyncTask(function()
             skipped = skipped + 1
         else
             local filename = photoFilename(photo, index)
-            progress:setCaption("Exporting " .. filename)
-            local previewPath, exportErr = exportPreview(photo, previewDir)
-            if not previewPath then
-                progress:done()
-                LrDialogs.message("Export failed", exportErr or "Could not export preview.", "critical")
-                return
-            end
             local uuid = getMeta(photo, "uuid")
             local photoId = uuid ~= "" and uuid or ("photo-" .. tostring(photo.localIdentifier or index))
-            manifest.photos[#manifest.photos + 1] = {
+            queued[#queued + 1] = {
+                photo = photo,
                 photo_id = photoId,
                 catalog_uuid = uuid,
                 local_identifier = tostring(photo.localIdentifier or ""),
                 original_path = getMeta(photo, "path"),
                 filename = filename,
-                preview_path = previewPath,
-            }
-            manifest.server_photos[#manifest.server_photos + 1] = {
-                photo_id = photoId,
-                original_filename = filename,
                 context = buildContext(photo),
             }
         end
     end
 
     if progress:isCanceled() then progress:done(); return end
-    if #manifest.photos == 0 then
+    if #queued == 0 then
         progress:done()
         LrDialogs.message("Generate Stock Metadata", "No photos were queued; all selected photos already contain metadata.", "info")
         return
+    end
+    progress:setCaption("Exporting " .. tostring(#queued) .. " previews")
+    local exportPhotos = {}
+    for index, item in ipairs(queued) do exportPhotos[index] = item.photo end
+    local previews, exportErr = exportPreviews(exportPhotos, previewDir, progress)
+    if not previews then
+        progress:done()
+        LrDialogs.message("Export failed", exportErr or "Could not export previews.", "critical")
+        return
+    end
+    for index, item in ipairs(queued) do
+        local previewPath = previews[exportKey(item.photo, index)]
+        if not previewPath then
+            progress:done()
+            LrDialogs.message("Export failed", "A preview could not be matched to " .. item.filename, "critical")
+            return
+        end
+        item.photo = nil
+        item.preview_path = previewPath
+        local context = item.context
+        item.context = nil
+        manifest.photos[#manifest.photos + 1] = item
+        manifest.server_photos[#manifest.server_photos + 1] = {
+            photo_id = item.photo_id,
+            original_filename = item.filename,
+            context = context,
+        }
     end
     local saved, saveError = JobState.writeJson(LrPathUtils.child(jobFolder, "job.json"), manifest)
     if not saved then

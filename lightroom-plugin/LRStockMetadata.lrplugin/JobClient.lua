@@ -1,5 +1,4 @@
 local LrHttp = import "LrHttp"
-local LrStringUtils = import "LrStringUtils"
 local json = require "json"
 
 local JobClient = {}
@@ -45,6 +44,17 @@ local function post(settings, path, payload)
     return decodeResponse(body, headers)
 end
 
+local function postBytes(settings, path, data, contentType)
+    local body, headers = LrHttp.post(
+        baseUrl(settings) .. path,
+        data,
+        { { field = "Content-Type", value = contentType } },
+        "POST",
+        settings.timeoutSeconds
+    )
+    return decodeResponse(body, headers)
+end
+
 local function get(settings, path)
     local body, headers = LrHttp.get(baseUrl(settings) .. path, {}, settings.timeoutSeconds)
     return decodeResponse(body, headers)
@@ -54,21 +64,6 @@ local function readFileBytes(path)
     local file, openError = io.open(path, "rb")
     if not file then return nil, openError end
     local bytes = file:read("*all"); file:close(); return bytes
-end
-
-local function base64Encode(bytes)
-    if LrStringUtils and LrStringUtils.encodeBase64 then return LrStringUtils.encodeBase64(bytes) end
-    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    return ((bytes:gsub(".", function(x)
-        local bits, byte = "", x:byte()
-        for i = 8, 1, -1 do bits = bits .. (byte % 2 ^ i - byte % 2 ^ (i - 1) > 0 and "1" or "0") end
-        return bits
-    end) .. "0000"):gsub("%d%d%d?%d?%d?%d?", function(x)
-        if #x < 6 then return "" end
-        local value = 0
-        for i = 1, 6 do value = value + (x:sub(i, i) == "1" and 2 ^ (6 - i) or 0) end
-        return chars:sub(value + 1, value + 1)
-    end) .. ({ "", "==", "=" })[#bytes % 3 + 1])
 end
 
 function JobClient.create(settings, manifest)
@@ -88,7 +83,12 @@ end
 function JobClient.upload(settings, jobId, photoId, previewPath)
     local bytes, readError = readFileBytes(previewPath)
     if not bytes then return nil, readError end
-    return post(settings, "/jobs/" .. jobId .. "/photos/" .. photoId .. "/preview", { image_base64 = base64Encode(bytes) })
+    return postBytes(
+        settings,
+        "/jobs/" .. jobId .. "/photos/" .. photoId .. "/preview/binary",
+        bytes,
+        "image/jpeg"
+    )
 end
 
 function JobClient.run(settings, jobId)
@@ -101,6 +101,17 @@ end
 
 function JobClient.result(settings, jobId)
     return get(settings, "/jobs/" .. jobId .. "/result")
+end
+
+function JobClient.delete(settings, jobId)
+    local body, headers = LrHttp.post(
+        baseUrl(settings) .. "/jobs/" .. jobId,
+        "",
+        {},
+        "DELETE",
+        settings.timeoutSeconds
+    )
+    return decodeResponse(body, headers)
 end
 
 function JobClient.submit(settings, manifest, progress)

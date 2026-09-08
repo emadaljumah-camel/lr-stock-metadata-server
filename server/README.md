@@ -81,6 +81,8 @@ job.json
 status.json
 uploads.json
 checkpoint.json
+agency_review.json
+model_failures.json
 previews/
 result.json
 ```
@@ -89,6 +91,18 @@ Writes use temporary files and atomic replacement. Every completed photo is
 checkpointed before processing continues. Startup marks jobs left in `running`
 as `interrupted`; calling the run endpoint again resumes from the checkpoint.
 Job data is intentionally retained until manually removed.
+
+Agency-review calls use strict JSON schemas and bounded retries. A repeatedly
+malformed normal review window is split into smaller child windows without
+changing the configured parent-window layout, so existing schema-6 review
+checkpoints remain reusable. Partial child results are checkpointed in
+`agency_review.json`; model response failures and finish reasons are retained in
+`model_failures.json`. Configure resilience under `metadata.agency_review`:
+
+```yaml
+model_max_attempts: 3
+model_retry_max_tokens: 8000
+```
 
 ## Test Client
 
@@ -104,6 +118,12 @@ The server writes one of these values for Lightroom Instructions:
 - `agency:getty_commercial`
 - `agency:adobe_shutterstock`
 - `agency:shutterstock_editorial`
+
+The initial metadata pass owns the editorial/commercial classification, and the
+agency review cannot change it. Agency review changes only the destination: an
+initially editorial photograph becomes Getty Editorial or Shutterstock
+Editorial, while an initially commercial photograph becomes Getty Commercial or
+Adobe/Shutterstock.
 
 For editorial images, the final description ends with:
 

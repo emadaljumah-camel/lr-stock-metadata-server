@@ -33,6 +33,8 @@ metadata:
     enabled: true
     batch_size: 10
     batch_overlap: 2
+    model_max_attempts: 3
+    model_retry_max_tokens: 8000
     minimum_technical_score: 75
     minimum_getty_score: 73
     preferred_getty_per_sequence: 1
@@ -40,7 +42,8 @@ metadata:
     target_getty_ratio: 0.20
     commercial_recovery:
       enabled: true
-      preliminary_getty_score: 65
+      preliminary_technical_score: 80
+      preliminary_getty_score: 60
       minimum_technical_score: 82
       minimum_getty_score: 75
 

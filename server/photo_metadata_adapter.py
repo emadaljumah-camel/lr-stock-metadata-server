@@ -688,7 +688,7 @@ def call_hybrid_local_lm_for_metadata(client, metadata_model: str, image_path: P
                     ],
                 },
             ],
-            max_tokens=3000,
+            max_tokens=6000,
             temperature=0.2,
         )
         raw = _chat_response_text(response)

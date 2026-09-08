@@ -5,6 +5,7 @@ import binascii
 import hashlib
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -128,13 +129,18 @@ class JobStore:
     def save_preview(
         self, job_id: str, photo_id: str, image_base64: str
     ) -> tuple[str, bool]:
-        request = self.get_request(job_id)
-        if photo_id not in {photo.photo_id for photo in request.photos}:
-            raise KeyError(photo_id)
         try:
             data = base64.b64decode(image_base64, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise ValueError("Preview is not valid base64") from exc
+        return self.save_preview_bytes(job_id, photo_id, data)
+
+    def save_preview_bytes(
+        self, job_id: str, photo_id: str, data: bytes
+    ) -> tuple[str, bool]:
+        request = self.get_request(job_id)
+        if photo_id not in {photo.photo_id for photo in request.photos}:
+            raise KeyError(photo_id)
         if len(data) < 3 or data[:3] != b"\xff\xd8\xff":
             raise ValueError("Preview is not a JPEG image")
 
@@ -196,6 +202,17 @@ class JobStore:
         with _STORE_LOCK:
             self._write_json(self.job_dir(job_id) / "agency_review.json", review)
 
+    def save_model_failure(self, job_id: str, event: dict[str, Any]) -> None:
+        with _STORE_LOCK:
+            path = self.job_dir(job_id) / "model_failures.json"
+            payload = self._read_json(path) if path.is_file() else {"events": []}
+            events = payload.get("events")
+            if not isinstance(events, list):
+                events = []
+            events.append({"recorded_at": utc_now(), **event})
+            payload["events"] = events[-100:]
+            self._write_json(path, payload)
+
     def save_result(self, result: JobResult) -> None:
         expected = [photo.photo_id for photo in self.get_request(result.job_id).photos]
         actual = [item.photo_id for item in result.results]
@@ -230,6 +247,17 @@ class JobStore:
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
         return interrupted
+
+    def delete_job(self, job_id: str) -> dict[str, Any]:
+        with _STORE_LOCK:
+            directory = self.job_dir(job_id)
+            if not (directory / "job.json").is_file():
+                raise KeyError(job_id)
+            status = self.get_status(job_id)
+            if status.get("status") == "running":
+                raise JobConflictError("A running job cannot be deleted")
+            shutil.rmtree(directory)
+            return {"job_id": job_id, "deleted": True}
 
     @staticmethod
     def _safe_job_id(value: str) -> str:

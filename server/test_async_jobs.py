@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import tempfile
 import unittest
@@ -71,6 +72,23 @@ class JobStoreTests(unittest.TestCase):
                 base64.b64encode(JPEG + b"changed").decode("ascii"),
             )
 
+    def test_binary_preview_preserves_bytes_and_matches_legacy_retry(self) -> None:
+        job_id, _ = self.store.create_job(job_request())
+        preview = JPEG + b"\x00Exif"
+        digest, reused = self.store.save_preview_bytes(job_id, "photo-1", preview)
+        repeated_digest, repeated = self.store.save_preview(
+            job_id,
+            "photo-1",
+            base64.b64encode(preview).decode("ascii"),
+        )
+
+        self.assertFalse(reused)
+        self.assertTrue(repeated)
+        self.assertEqual(repeated_digest, digest)
+        self.assertEqual(
+            self.store.preview_path(job_id, "photo-1").read_bytes(), preview
+        )
+
     def test_running_job_is_marked_interrupted_after_restart(self) -> None:
         job_id, _ = self.store.create_job(job_request())
         self.store.set_status(
@@ -81,6 +99,28 @@ class JobStoreTests(unittest.TestCase):
         status = self.store.get_status(job_id)
         self.assertEqual(status["status"], "interrupted")
         self.assertTrue(status["resumable"])
+
+    def test_model_failures_are_persisted_and_bounded(self) -> None:
+        job_id, _ = self.store.create_job(job_request())
+        for attempt in range(105):
+            self.store.save_model_failure(
+                job_id,
+                {
+                    "task": "agency_review/window-0001",
+                    "attempt": attempt,
+                    "error": "invalid JSON",
+                    "raw_response": "{broken}",
+                },
+            )
+
+        payload = json.loads(
+            (self.store.job_dir(job_id) / "model_failures.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(len(payload["events"]), 100)
+        self.assertEqual(payload["events"][0]["attempt"], 5)
+        self.assertIn("recorded_at", payload["events"][-1])
 
 
 class JobRunnerTests(unittest.TestCase):
@@ -111,6 +151,7 @@ class JobRunnerTests(unittest.TestCase):
         self.assertEqual(result.results[0].photo_id, "photo-1")
         self.assertEqual(result.results[0].title, "Test title")
         review.assert_called_once()
+        self.assertTrue(callable(review.call_args.kwargs["diagnostics"]))
         self.assertEqual(self.store.get_status(self.job_id)["status"], "completed")
 
 
@@ -154,6 +195,56 @@ class JobEndpointTests(unittest.TestCase):
             response = client.get("/jobs/not-present/status")
         self.assertEqual(response.status_code, 404)
 
+    def test_binary_upload_contract_and_legacy_retry(self) -> None:
+        with TestClient(main.app) as client:
+            client.post(
+                "/jobs", json=job_request("binary-job").model_dump(mode="json")
+            )
+            uploaded = client.post(
+                "/jobs/binary-job/photos/photo-1/preview/binary",
+                content=JPEG + b"\x00Exif",
+                headers={"Content-Type": "image/jpeg"},
+            )
+            repeated = client.post(
+                "/jobs/binary-job/photos/photo-1/preview",
+                json={
+                    "image_base64": base64.b64encode(JPEG + b"\x00Exif").decode(
+                        "ascii"
+                    )
+                },
+            )
+            invalid_type = client.post(
+                "/jobs/binary-job/photos/photo-1/preview/binary",
+                content=JPEG,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+
+        self.assertEqual(uploaded.status_code, 200)
+        self.assertFalse(uploaded.json()["reused"])
+        self.assertTrue(repeated.json()["reused"])
+        self.assertEqual(invalid_type.status_code, 415)
+
+    def test_failed_job_can_be_deleted(self) -> None:
+        main.JOB_STORE.create_job(job_request("deletable-job"))
+        main.JOB_STORE.set_status(
+            "deletable-job", "failed", JobProgress(total_photos=1), errors=["bad GPS"]
+        )
+        with TestClient(main.app) as client:
+            response = client.delete("/jobs/deletable-job")
+            status = client.get("/jobs/deletable-job/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["deleted"])
+        self.assertEqual(status.status_code, 404)
+
+    def test_running_job_cannot_be_deleted(self) -> None:
+        main.JOB_STORE.create_job(job_request("running-job"))
+        with TestClient(main.app) as client:
+            main.JOB_STORE.set_status(
+                "running-job", "running", JobProgress(total_photos=1)
+            )
+            response = client.delete("/jobs/running-job")
+        self.assertEqual(response.status_code, 409)
+
 
 class LightroomAsyncContractTests(unittest.TestCase):
     @classmethod
@@ -181,6 +272,8 @@ class LightroomAsyncContractTests(unittest.TestCase):
         self.assertIn("JobClient.run", self.check_source)
         self.assertIn('active.status == "downloaded"', self.check_source)
         self.assertIn("completed_result.json", self.check_source)
+        self.assertIn("Delete Job", self.check_source)
+        self.assertIn("JobClient.delete", self.check_source)
 
     def test_result_apply_batches_catalog_writes_and_reuses_keywords(self) -> None:
         self.assertIn("local APPLY_BATCH_SIZE = 25", self.check_source)
@@ -193,6 +286,13 @@ class LightroomAsyncContractTests(unittest.TestCase):
     def test_status_menu_and_timeout_contract_are_present(self) -> None:
         self.assertIn("Check Job Status / Apply Results", self.info_source)
         self.assertIn('"POST",\n        settings.timeoutSeconds', self.client_source)
+
+    def test_plugin_uses_one_export_session_and_binary_job_uploads(self) -> None:
+        self.assertEqual(self.submit_source.count("LrExportSession {"), 1)
+        self.assertIn("photosToExport = photos", self.submit_source)
+        self.assertIn("LR_initialSequenceNumber = 1", self.submit_source)
+        self.assertIn("preview/binary", self.client_source)
+        self.assertNotIn("base64Encode", self.client_source)
 
 
 if __name__ == "__main__":

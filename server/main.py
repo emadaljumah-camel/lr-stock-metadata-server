@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 
 from .config import UPLOAD_DIR
 from .config import JOBS_DIR, MAX_JOB_WORKERS
@@ -81,6 +81,31 @@ def upload_job_preview(
     return {"job_id": job_id, "photo_id": photo_id, "sha256": digest, "reused": reused}
 
 
+@app.post("/jobs/{job_id}/photos/{photo_id}/preview/binary")
+def upload_binary_job_preview(
+    job_id: str,
+    photo_id: str,
+    data: bytes = Body(media_type="image/jpeg"),
+    content_type: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_job(job_id)
+    if (content_type or "").split(";", 1)[0].strip().lower() != "image/jpeg":
+        raise HTTPException(
+            status_code=415, detail="Preview Content-Type must be image/jpeg"
+        )
+    try:
+        digest, reused = JOB_STORE.save_preview_bytes(job_id, photo_id, data)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="Unknown photo_id for this job"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PreviewConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"job_id": job_id, "photo_id": photo_id, "sha256": digest, "reused": reused}
+
+
 @app.get("/jobs/{job_id}/uploads")
 def uploaded_job_photos(job_id: str) -> dict[str, object]:
     _require_job(job_id)
@@ -112,6 +137,16 @@ def job_result(job_id: str) -> dict[str, object]:
         return JOB_STORE.load_result(job_id).model_dump(mode="json")
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=500, detail="Stored result is invalid") from exc
+
+
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: str) -> dict[str, object]:
+    try:
+        return JOB_STORE.delete_job(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Unknown job") from exc
+    except JobConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _generate_or_500(image_path: str, original_filename: str, context: dict) -> dict:

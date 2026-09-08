@@ -215,7 +215,7 @@ LrTasks.startAsyncTask(function()
                 "Stock metadata job interrupted",
                 errors ~= "" and errors or "The job can be resumed from its checkpoint.",
                 "Resume Job",
-                "Cancel"
+                "More Options"
             )
             if resume == "ok" then
                 local resumed, resumeError = JobClient.run(settings, active.job_id)
@@ -223,6 +223,29 @@ LrTasks.startAsyncTask(function()
                 active.status = resumed.status or "running"
                 JobState.saveActive(jobRoot, active)
                 progress:done(); LrDialogs.message("Stock metadata job resumed", "The server resumed job " .. active.job_id .. ".", "info"); return
+            end
+            local delete = LrDialogs.confirm(
+                "Delete stock metadata job?",
+                "This removes the failed job from the server and deletes its local previews. This cannot be undone.",
+                "Delete Job",
+                "Keep Job"
+            )
+            if delete == "ok" then
+                local deleted, deleteError = JobClient.delete(settings, active.job_id)
+                if not deleted and not tostring(deleteError or ""):match("HTTP error 404") then
+                    progress:done()
+                    LrDialogs.message("Delete error", deleteError or "Could not delete the server job.", "critical")
+                    return
+                end
+                local localDeleted, localDeleteError = JobState.deleteFolder(active.job_folder)
+                if not localDeleted then
+                    progress:done(); LrDialogs.message("Delete error", localDeleteError, "critical"); return
+                end
+                local activeDeleted, activeDeleteError = JobState.deleteActive(jobRoot)
+                if not activeDeleted then
+                    progress:done(); LrDialogs.message("Delete error", activeDeleteError, "critical"); return
+                end
+                progress:done(); LrDialogs.message("Stock metadata job deleted", "The failed job was removed. You can start a new job.", "info"); return
             end
             progress:done(); return
         end

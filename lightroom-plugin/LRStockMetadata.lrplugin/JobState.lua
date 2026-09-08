@@ -64,4 +64,19 @@ function JobState.saveActive(jobRoot, state)
     return JobState.writeJson(JobState.activePath(jobRoot), state)
 end
 
+function JobState.deleteActive(jobRoot)
+    local path = JobState.activePath(jobRoot)
+    if LrFileUtils.exists(path) and not LrFileUtils.delete(path) then
+        return false, "Could not clear active job state: " .. path
+    end
+    return true
+end
+
+function JobState.deleteFolder(folder)
+    if LrFileUtils.exists(folder) and not LrFileUtils.delete(folder) then
+        return false, "Could not delete local job folder: " .. folder
+    end
+    return true
+end
+
 return JobState

@@ -135,6 +135,7 @@ class JobRunner:
             checkpoint=self.store.load_agency_review(job_id),
             save_checkpoint=lambda review: self.store.save_agency_review(job_id, review),
             progress=report_review_progress,
+            diagnostics=lambda event: self.store.save_model_failure(job_id, event),
         )
         self.store.save_result(JobResult(job_id=job_id, results=ordered))
         self.store.set_status(

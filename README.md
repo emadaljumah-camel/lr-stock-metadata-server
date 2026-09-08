@@ -62,14 +62,25 @@ so interrupted submissions are also resumable.
 After per-photo metadata generation, the server performs a comparative agency
 review over overlapping groups of neighboring photos. It starts each routing
 decision from scratch, so it can promote Adobe/Shutterstock selections to Getty
-or demote Getty selections while preserving editorial/commercial usage. Review
-progress is stored in `agency_review.json`; `result.json` is written only after
-the comparative review succeeds.
+or demote Getty selections. The initial metadata pass remains the sole owner of
+the editorial/commercial flags; agency review changes only the agency destination.
+Review progress is stored in `agency_review.json`; `result.json` is written only
+after the comparative review succeeds.
+
+Every agency-review model call requests strict schema-constrained JSON and is
+retried when the response is malformed or incomplete. If a normal review window
+still fails, only that window is divided into smaller checkpointed child windows;
+completed parent windows are reused. Failed response diagnostics are retained in
+`model_failures.json` inside the server job folder. Retry count and the enlarged
+output budget are configured with `model_max_attempts` and
+`model_retry_max_tokens` under `metadata.agency_review`.
 
 Getty candidates must independently pass configured technical-quality and
-Getty-merit thresholds. A finalist pass then removes only true visual/sequence
-duplicates, preferring one representative and permitting a second only when it
-has a materially different story, action, composition, or buyer use. The
+Getty-merit thresholds. A finalist pass then removes redundant frames from the
+same continuous shoot, setting, repeated treatment, or substantially overlapping
+visual story and buyer use. It prefers one representative and permits a second
+only when it has a materially different story, action, composition, atmosphere,
+scale, or buyer use. The
 configured Getty ratio is a non-enforced planning target: weak images are never
 promoted to fill it, and unrelated qualified scenes are not demoted merely
 because another candidate is stronger.
@@ -77,19 +88,23 @@ because another candidate is stronger.
 Review decisions are made without the initial agency choice or the
 editorial/commercial routing flag. The same quality gates apply to both usage
 types, and strong commercial imagery can qualify through exceptional visual
-treatment without a quota or lower threshold.
+treatment without a quota or lower threshold. After agency selection, the locked
+initial flag maps Getty selections to Getty Editorial or Getty Commercial and
+maps other selections to Shutterstock Editorial or Adobe/Shutterstock.
 
-Commercial images rejected by the mixed-content review receive a recovery pass
-only when their preliminary technical score is at least 82 and Getty merit is at
-least 65. Recovery promotion then requires a fresh technical score of at least
-82 and Getty merit of at least 75, plus visibly distinctive premium-commercial
-treatment. This is a promotion opportunity, not a commercial quota.
+Images initially classified as commercial that are rejected by the mixed-content
+review receive a recovery pass when their preliminary technical score is at least
+80 and Getty merit is at least 60. Recovery promotion then requires a fresh
+technical score of at least 82 and Getty merit of at least 75, plus visibly
+distinctive premium-commercial treatment. This is a promotion opportunity, not
+a commercial quota, and it never changes usage flags.
 
 All qualified Getty candidates are shown together in labeled contact sheets for
-one global sequence review. This lets distant frames from the same subject or
-scene be grouped before the configured per-sequence maximum is enforced. Every
-proposed repeated group is then confirmed from the full individual images before
-any demotion is applied.
+one global sequence-diversity review. This lets distant frames from the same
+continuous shoot, setting, or overlapping visual treatment be grouped before the
+configured per-sequence maximum is enforced. Every proposed group is confirmed
+from the full individual images, and that confirmation explicitly chooses the
+strongest differentiated Getty representatives before any demotion is applied.
 
 Only one active Lightroom job is tracked at a time. Apply the active job before
 submitting another. Job files are retained for recovery and are not deleted
