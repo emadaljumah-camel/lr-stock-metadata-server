@@ -54,7 +54,7 @@ function provider.sectionsForTopOfDialog(f, propertyTable)
                 },
             },
             f:static_text {
-                title = "Example: http://100.108.139.62:8008",
+                title = "Example: http://localhost:8008",
             },
             f:row {
                 bind_to_object = propertyTable,
