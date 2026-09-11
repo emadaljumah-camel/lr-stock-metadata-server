@@ -47,12 +47,7 @@ _wikipedia_geosearch_cache: dict[tuple[float, float], list[dict]] = {}
 
 
 def generate_metadata_for_image(image_path: str, original_filename: str, context: dict) -> dict:
-    """Generate Lightroom-ready stock metadata using the copied hybrid model path.
-
-    This adapter is intentionally self-contained. It does not import, execute,
-    or modify the original Photo Metadata Tool; that project is only the
-    reference source for the logic copied here.
-    """
+    """Generate Lightroom-ready stock metadata using the configured hybrid model path."""
     path = Path(image_path)
     context = context or {}
     agency_style = str(context.get("agency_style") or setting("metadata.agency_style", "generic", "PHOTO_METADATA_AGENCY_STYLE")).strip()

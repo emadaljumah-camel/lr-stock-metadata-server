@@ -1,132 +1,150 @@
-# Lightroom Stock Metadata FastAPI Server
+# LR Stock Metadata Server API
 
-This server is an independent implementation of the Photo Metadata Tool hybrid metadata path. It does not import, run, or modify `D:\Projects\photo-metadata-tool`.
+FastAPI service for generating stock-photo metadata from JPEG previews submitted by the Lightroom Classic plugin.
 
-The Lightroom plugin sends only the exported preview image and original filename. GPS and Date Created are extracted from the preview JPEG metadata on the server.
+The server extracts available GPS coordinates and capture dates from preview JPEG metadata. It processes images through a local LM Studio vision model by default, with optional Gemini or OpenAI fallback.
+
+For the end-to-end flow between Lightroom, the plugin, this service, model providers, and local job storage, see the repository's [architecture and data-flow overview](../README.md#architecture-and-data-flow).
+
+## Requirements
+
+- Python 3.10 or newer
+- An LM Studio instance with a compatible vision model loaded
+- Optional: Gemini or OpenAI credentials if cloud fallback is enabled
 
 ## Install
 
+From the repository root:
+
 ```powershell
-cd D:\Projects\lr-stock-metadata-server
 python -m venv .venv
-.\.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 pip install -r server\requirements.txt
 ```
 
-## Configure Models
+## Configure
 
-Edit `server/config.yaml`:
+Edit [`config.yaml`](config.yaml) to match your environment:
 
 ```yaml
+server:
+  host: "localhost"
+  port: 8003
+  jobs_dir: "_jobs"
+  max_job_workers: 1
+
 models:
   lm_studio_base_url: "http://localhost:1234/v1"
-  lm_studio_api_key: "lm-studio"
   hybrid_local_model: "your-local-vision-model-id"
-
   allow_cloud_fallback: false
-  fallback_provider: "gemini" # gemini or openai
-  gemini_model: "gemini-3-flash-preview"
-  openai_model: "gpt-5.4-mini"
-  gemini_api_key: ""
-  openai_api_key: ""
 ```
 
-`hybrid_local_model` must match the model id/name exposed by LM Studio.
+`hybrid_local_model` must exactly match the model ID exposed by LM Studio.
 
-`allow_cloud_fallback` controls whether the server may call Gemini/OpenAI automatically when the local hybrid path fails. Keep it `false` to require local-only processing.
+Keep `allow_cloud_fallback: false` for local-only processing. To enable fallback, set it to `true`, choose `gemini` or `openai` as `fallback_provider`, and provide the appropriate API key. Leave the YAML key blank and use `GEMINI_API_KEY` or `OPENAI_API_KEY` environment variables to avoid storing credentials in the repository.
 
-Environment variables still work as fallback if a YAML value is blank. To use a different config file, set `LR_METADATA_CONFIG` to its path before starting the server.
+Configuration values can be overridden with environment variables. Set `LR_METADATA_CONFIG` to use a different configuration file.
 
 ## Run
+
+Start LM Studio and load the configured model, then run this from the repository root:
 
 ```powershell
 .\run_server.bat
 ```
 
-`run_server.bat` reads `server.host` and `server.port` from `server/config.yaml`.
-
-Durable job storage and worker concurrency are configured in the same file:
-
-```yaml
-server:
-  jobs_dir: "_jobs"
-  max_job_workers: 1
-```
-
-Use one Uvicorn process with the filesystem job store. Increase
-`max_job_workers` only when the model server can safely handle concurrent
-generation requests.
-
-Health check:
+`run_server.bat` reads the host and port from `server/config.yaml`. With the committed configuration, verify the service at:
 
 ```powershell
-curl http://127.0.0.1:8008/health
+curl http://localhost:8003/health
 ```
 
-## Asynchronous Job API
+For a server on another computer, configure `server.host` to a reachable interface, allow the port through the firewall, and use that computer's LAN address in Lightroom.
 
-The Lightroom client uses this sequence:
+## Lightroom Connection URLs
 
-1. `POST /jobs` creates or reuses a job with the same client id and manifest.
-2. `GET /jobs/{job_id}/uploads` discovers previews already acknowledged.
-3. `POST /jobs/{job_id}/photos/{photo_id}/preview` uploads missing JPEGs.
-4. `POST /jobs/{job_id}/run` queues or resumes background generation.
-5. `GET /jobs/{job_id}/status` reports stage and photo progress.
-6. `GET /jobs/{job_id}/result` returns the complete result after completion.
+The plugin appends API paths such as `/jobs` and `/health` to its configured server URL.
 
-Each server job is stored under `_jobs/<job-id>/`:
+| Deployment | Example plugin URL | Notes |
+| --- | --- | --- |
+| Direct local server | `http://localhost:8003` | Matches the committed `config.yaml`. |
+| Direct remote server | `http://192.168.1.50:8003` | Requires network and firewall access. |
+| Reverse proxy | `http://localhost:8080/metadata` | The proxy must strip `/metadata` and forward the remaining API path to this service. |
+
+Use the URL that matches your own server or proxy configuration. The plugin's committed default is only a starting value; Lightroom Plug-in Manager settings take precedence.
+
+## Processing Pipeline
 
 ```text
-job.json
-status.json
-uploads.json
-checkpoint.json
-agency_review.json
-model_failures.json
-previews/
-result.json
+Create job
+  -> validate manifest and create job folder
+  -> accept and deduplicate preview uploads
+  -> queue background worker
+  -> generate metadata for each photo
+  -> checkpoint each completed photo
+  -> run comparative agency review across related photos
+  -> write result.json
+  -> Lightroom downloads and applies the result
 ```
 
-Writes use temporary files and atomic replacement. Every completed photo is
-checkpointed before processing continues. Startup marks jobs left in `running`
-as `interrupted`; calling the run endpoint again resumes from the checkpoint.
-Job data is intentionally retained until manually removed.
+For each photo, the server reads the uploaded preview and available embedded metadata, sends the image to the configured vision model, and produces a title, caption, keywords, editorial/commercial classification, and preliminary agency routing. Each completed photo is checkpointed before the next one is processed.
 
-Agency-review calls use strict JSON schemas and bounded retries. A repeatedly
-malformed normal review window is split into smaller child windows without
-changing the configured parent-window layout, so existing schema-6 review
-checkpoints remain reusable. Partial child results are checkpointed in
-`agency_review.json`; model response failures and finish reasons are retained in
-`model_failures.json`. Configure resilience under `metadata.agency_review`:
+After the per-photo pass, the server can perform comparative agency review across neighboring photos. This pass evaluates candidate quality and sequence diversity, while preserving the editorial/commercial classification from the initial pass. The final job result is written only after the required processing and review complete.
 
-```yaml
-model_max_attempts: 3
-model_retry_max_tokens: 8000
-```
+Uploads are idempotent, job files use atomic replacement, interrupted jobs are recoverable after restart, and malformed agency-review model responses receive bounded retries. These safeguards allow a job to resume without regenerating already completed photos.
 
-## Test Client
+## Durable Jobs
+
+The Lightroom plugin uses the durable-job API rather than changing catalog metadata during submission:
+
+1. `POST /jobs` creates or reuses a job.
+2. `GET /jobs/{job_id}/uploads` identifies previews already stored.
+3. `POST /jobs/{job_id}/photos/{photo_id}/preview` uploads a JSON/base64 preview, or the `/binary` variant uploads JPEG bytes directly.
+4. `POST /jobs/{job_id}/run` starts or resumes metadata generation.
+5. `GET /jobs/{job_id}/status` reports progress.
+6. `GET /jobs/{job_id}/result` returns the completed result.
+
+Jobs are written to the configured `jobs_dir` (default: `_jobs/`). Each completed photo is checkpointed. If the server restarts, running jobs become `interrupted` and can be resumed without regenerating completed work. Job artifacts are retained until manually removed.
+
+Use one Uvicorn process with the filesystem job store. Increase `max_job_workers` only when the model server can handle concurrent generation requests.
+
+## API Reference
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Service health status |
+| `POST` | `/generate-metadata` | Generate metadata from a multipart image upload |
+| `POST` | `/generate-metadata-json` | Generate metadata from a JSON request |
+| `POST` | `/jobs` | Create or reuse a durable job |
+| `GET` | `/jobs/{job_id}/uploads` | List stored previews |
+| `POST` | `/jobs/{job_id}/photos/{photo_id}/preview` | Upload a base64-encoded preview |
+| `POST` | `/jobs/{job_id}/photos/{photo_id}/preview/binary` | Upload a JPEG preview as binary data |
+| `POST` | `/jobs/{job_id}/run` | Queue or resume a job |
+| `GET` | `/jobs/{job_id}/status` | Retrieve job state and progress |
+| `GET` | `/jobs/{job_id}/result` | Retrieve a completed job result |
+| `DELETE` | `/jobs/{job_id}` | Delete a job and its stored artifacts |
+
+## Test a Single Image
+
+The test client submits a JPEG to the multipart endpoint. Pass the server URL explicitly so it matches your configuration:
 
 ```powershell
-python server\test_client.py C:\path\photo-with-gps-exif.jpg
+python server\test_client.py C:\path\to\photo-with-gps-exif.jpg --url http://localhost:8003/generate-metadata
 ```
 
-## Agency Instructions
+## Output Routing
 
-The server writes one of these values for Lightroom Instructions:
-
-- `agency:getty_editorial`
-- `agency:getty_commercial`
-- `agency:adobe_shutterstock`
-- `agency:shutterstock_editorial`
-
-The initial metadata pass owns the editorial/commercial classification, and the
-agency review cannot change it. Agency review changes only the destination: an
-initially editorial photograph becomes Getty Editorial or Shutterstock
-Editorial, while an initially commercial photograph becomes Getty Commercial or
-Adobe/Shutterstock.
-
-For editorial images, the final description ends with:
+The server writes one of these values to Lightroom's Instructions field:
 
 ```text
-City, Country - Month Day, Year
+agency:getty_editorial
+agency:getty_commercial
+agency:adobe_shutterstock
+agency:shutterstock_editorial
 ```
+
+The initial metadata pass decides whether an image is editorial or commercial. Agency review can change the destination agency, but never that classification. For editorial images, the final description ends with `City, Country - Month Day, Year`.
+
+## Privacy
+
+Preview JPEGs and job artifacts remain on the server filesystem. With cloud fallback disabled, image analysis stays on the local model server. Enabling fallback may transmit previews and processing input to the selected provider.

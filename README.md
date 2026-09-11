@@ -18,6 +18,29 @@ The project includes:
 
 The server extracts GPS coordinates and capture date from preview JPEG metadata. The plugin sends the preview image and original filename.
 
+## Architecture and Data Flow
+
+```text
+Lightroom Classic
+  | exports JPEG previews
+  v
+Lightroom Plugin
+  | uploads previews and starts a durable job
+  v
+FastAPI Metadata Server ------------------> Local LM Studio model
+  |                                          (optional cloud fallback)
+  | stores checkpoints and results
+  v
+Local Job Storage
+  |
+  v
+Lightroom Plugin applies title, caption, keywords, and routing
+```
+
+Photos remain in Lightroom; the plugin sends exported JPEG previews and their original filenames to the server. The server creates a durable job, stores recovery artifacts locally, and uses the configured vision model to generate metadata and agency-routing decisions.
+
+When processing completes, Lightroom retrieves the validated result and applies title, caption, keywords, and Instructions in one catalog write. With cloud fallback disabled, preview analysis remains on the local model server. Enabling fallback may transmit previews and associated processing input to the selected provider.
+
 ## Features
 
 - Title, caption, keyword, and Lightroom Instructions generation.
