@@ -1,93 +1,76 @@
 # LR Stock Metadata Server
 
-Generate stock-ready photo metadata in Lightroom Classic using a local vision model, with optional cloud fallback.
+Generate titles, captions, keywords, and agency-routing metadata for photos
+in **Adobe Lightroom Classic**, using a local vision model and optional cloud
+fallback. This tool edits catalog metadata, not Develop settings, and does not
+upload submissions to stock agencies.
 
-The project includes:
+The project has two parts: a Lightroom plug-in and a Python FastAPI server.
+Submit previews as a background job, then use a second Lightroom command to
+download and apply the finished metadata.
 
-- A FastAPI server that analyzes exported JPEG previews.
-- A Lightroom Classic plugin for submitting photos and applying results.
-- Durable background jobs that can resume after Lightroom, the client computer, or the server restarts.
-- Optional comparative agency routing for Getty, Adobe Stock, and Shutterstock.
+## Contents
 
-## How It Works
+- [Requirements and compatibility](#requirements-and-compatibility)
+- [Setup](#setup)
+- [First job: one-photo walkthrough](#first-job-one-photo-walkthrough)
+- [Metadata written and limitations](#metadata-written-and-limitations)
+- [Architecture and data flow](#architecture-and-data-flow)
+- [Agency routing](#agency-routing)
+- [Recovery and rollback](#recovery-and-rollback)
+- [Updating an installation](#updating-an-installation)
+- [Troubleshooting](#troubleshooting)
+- [Privacy, development, and license](#privacy-development-and-license)
 
-1. In Lightroom Classic, select photos and run **Generate Stock Metadata**.
-2. The plugin exports JPEG previews and submits them to the server.
-3. The server generates metadata and performs optional agency review.
-4. Later, run **Check Job Status / Apply Results** in Lightroom to download and apply completed metadata.
+## Requirements and compatibility
 
-The server extracts GPS coordinates and capture date from preview JPEG metadata. The plugin sends the preview image and original filename.
+| Component | Requirement and evidence |
+|---|---|
+| Lightroom | Lightroom Classic, separately installed and licensed. The plug-in declares SDK/minimum 6.0 and version 1.1.0. No tested Lightroom release matrix is established. |
+| Python | Source uses Python 3.10+ syntax. The existing Windows Python 3.14.4 environment passed 43 mocked/unit tests during this documentation review; other versions were not tested in this review. |
+| Model server | LM Studio or a compatible OpenAI-style endpoint with an image-capable model loaded. Model IDs are configurable, not a tested compatibility list. |
+| Photos | Lightroom must be able to export JPEG previews with readable GPS EXIF. The current metadata path rejects previews without GPS. |
+| Network | Model server access plus configured location lookups. Disabling cloud AI fallback does not make the pipeline offline. |
 
-## Architecture and Data Flow
+Model weights and inference runtimes are not bundled. Hardware requirements
+depend on the model. Automated tests do not establish metadata accuracy, actual
+Lightroom application behavior, or a real model/version compatibility matrix.
 
-```text
-Lightroom Classic
-  | exports JPEG previews
-  v
-Lightroom Plugin
-  | uploads previews and starts a durable job
-  v
-FastAPI Metadata Server ------------------> Local LM Studio model
-  |                                          (optional cloud fallback)
-  | stores checkpoints and results
-  v
-Local Job Storage
-  |
-  v
-Lightroom Plugin applies title, caption, keywords, and routing
-```
+## Setup
 
-Photos remain in Lightroom; the plugin sends exported JPEG previews and their original filenames to the server. The server creates a durable job, stores recovery artifacts locally, and uses the configured vision model to generate metadata and agency-routing decisions.
+### 1. Install the server
 
-When processing completes, Lightroom retrieves the validated result and applies title, caption, keywords, and Instructions in one catalog write. With cloud fallback disabled, preview analysis remains on the local model server. Enabling fallback may transmit previews and associated processing input to the selected provider.
-
-## Features
-
-- Title, caption, keyword, and Lightroom Instructions generation.
-- Editorial or commercial classification.
-- Agency routing:
-  - Getty Editorial
-  - Getty Commercial
-  - Adobe Stock / Shutterstock
-  - Shutterstock Editorial
-- Persistent job checkpoints and retry-safe uploads.
-- Resume interrupted uploads and metadata generation.
-- Local LM Studio vision-model support.
-- Optional Gemini or OpenAI fallback.
-- Comparative review to reduce duplicate Getty selections within a sequence.
-
-## Requirements
-
-- Windows with Lightroom Classic.
-- Python 3.10 or newer.
-- [LM Studio](https://lmstudio.ai/) running a vision-capable model compatible with its OpenAI-style local API.
-- A Lightroom Classic catalog containing the photos to process.
-
-Cloud fallback is optional. If enabled, you also need an API key for Gemini or OpenAI.
-
-## Repository Layout
-
-```text
-server/                              FastAPI server and metadata pipeline
-lightroom-plugin/
-  LRStockMetadata.lrplugin/          Lightroom Classic plugin
-run_server.bat                       Windows server launcher
-```
-
-## Server Setup
-
-Clone the repository and create a virtual environment:
+In PowerShell:
 
 ```powershell
-git clone https://github.com/YOUR-USERNAME/lr-stock-metadata-server.git
+git clone https://github.com/emadaljumah-camel/lr-stock-metadata-server.git
 cd lr-stock-metadata-server
-
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r server\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r server\requirements.txt
 ```
 
-Configure the model server in [`server/config.yaml`](server/config.yaml):
+Use a Python interpreter meeting the requirements above. Run subsequent server
+commands from the repository root. For an existing installation, preserve its
+environment and follow [Updating an installation](#updating-an-installation).
+
+### 2. Configure the model and server
+
+The tracked [server/config.yaml](server/config.yaml) is the default configuration.
+For machine-specific settings, copy it **outside the repository** and select
+that copy with `LR_METADATA_CONFIG`. For example, on first setup:
+
+```powershell
+$settingsFolder = Join-Path $env:LOCALAPPDATA "LRStockMetadata"
+New-Item -ItemType Directory -Force -Path $settingsFolder | Out-Null
+Copy-Item server\config.yaml (Join-Path $settingsFolder "config.yaml")
+$env:LR_METADATA_CONFIG = Join-Path $settingsFolder "config.yaml"
+```
+
+Do not recopy over an existing private configuration. This environment variable
+applies to the current shell and processes started from it; set it again or
+persist it deliberately for later launches.
+
+Edit these entries in that configuration, keeping the other sections:
 
 ```yaml
 server:
@@ -96,161 +79,239 @@ server:
 
 models:
   lm_studio_base_url: "http://localhost:1234/v1"
-  hybrid_local_model: "your-local-vision-model-id"
+  hybrid_local_model: "YOUR-EXACT-LOADED-VISION-MODEL-ID"
   allow_cloud_fallback: false
 ```
 
-Set `hybrid_local_model` to the exact model ID displayed by LM Studio.
+Load an image-capable model in LM Studio and start its API server. Replace the
+placeholder with the exact ID exposed by that server:
 
-Start LM Studio, load the selected vision model, then start the API server:
+```powershell
+Invoke-RestMethod http://localhost:1234/v1/models
+```
+
+**Nonempty YAML values take precedence over environment variables**, then
+built-in defaults apply. This differs from many applications. An environment
+variable will not override an already populated YAML setting. The selected
+configuration is read at import/startup; restart after changes.
+
+The committed configuration uses port **8003**, but the plug-in's initial URL
+uses **8008**. Set the plug-in URL explicitly in step 4. If no configuration is
+available, the backend's built-in port fallback is also 8008.
+
+### 3. Start the server
+
+From the repository root, in the shell containing your configuration selection:
 
 ```powershell
 .\run_server.bat
 ```
 
-Confirm it is available:
+The launcher reads host/port from the selected server configuration and uses
+the repository's virtual environment. Leave the server and model runtime
+running. Check availability in another shell:
 
 ```powershell
-curl http://localhost:8003/health
+Invoke-RestMethod http://localhost:8003/health
 ```
 
-> The server URL configured in Lightroom must use the same host and port as `server.host` and `server.port` in `server/config.yaml`.
+Expect `status: ok`. Health does not verify image inference, GPS, geocoding,
+or agency-review completion.
 
-## Optional Cloud Fallback
+### 4. Install and configure the Lightroom plug-in
 
-Cloud fallback is disabled by default.
+1. In Lightroom Classic, open **File > Plug-in Manager > Add**.
+2. Select the complete
+   [LRStockMetadata.lrplugin](lightroom-plugin/LRStockMetadata.lrplugin/) folder.
+3. Select **05 LR Stock Metadata**.
+4. Under **LR Stock Metadata Server**, set **Server URL** to
+   `http://localhost:8003`. Do not add `/health` or `/jobs`.
+5. Check **Local job storage**. Its default is **LR Stock Metadata Jobs**
+   under your Documents folder.
 
-To enable it, update `server/config.yaml`:
+Saved Lightroom preferences override `PluginConfig.lua`. Editing that source
+file does not replace a previously saved URL.
 
-```yaml
-models:
-  allow_cloud_fallback: true
-  fallback_provider: "gemini" # or "openai"
-  gemini_api_key: ""
-  openai_api_key: ""
+For two computers, bind the server to a reachable private interface, restrict
+firewall access to the Lightroom computer, and use its private server address
+instead of localhost. Keep LM Studio private. The API has no authentication or
+built-in TLS; do not expose it to the public internet. See [SECURITY.md](SECURITY.md).
+
+### Optional cloud fallback
+
+Keep `allow_cloud_fallback: false` if you do not want cloud AI fallback.
+To enable it, select `gemini` or `openai` as `fallback_provider` and configure
+its model. Leave YAML API-key entries blank and supply credentials through
+`GEMINI_API_KEY` or `OPENAI_API_KEY`. A populated YAML key takes precedence.
+
+Fallback can transmit previews and processing context to a cloud provider and
+incur charges. Independently, GPS-based lookups can contact Nominatim and
+Wikipedia even with fallback disabled. See [data handling](SECURITY.md#data-handling).
+
+## First job: one-photo walkthrough
+
+Use a backed-up test photo with readable GPS and a correct capture date.
+
+1. Select the photo in Lightroom's Library module.
+2. Run **Library > Plug-in Extras > Generate Stock Metadata**.
+3. Choose **Overwrite** or **Skip Existing** in the metadata prompt.
+4. Wait for the job-queued acknowledgment. No catalog metadata is changed by
+   submission.
+5. Keep the server and model running. After acknowledged submission, Lightroom
+   can be closed or disconnected while the server processes.
+6. Reconnect and run **Check Job Status / Apply Results**.
+7. If still running, check again later. For a completed job, this command
+   validates and applies the downloaded results; there is no separate
+   per-photo recommendation approval screen.
+8. Inspect title, caption, keywords, and Instructions in Lightroom.
+
+The example does not promise particular wording or agency acceptance. Review
+names, dates, locations, trademark/release implications, and keyword accuracy.
+The current overwrite choice is made during submission; check-results is an
+application command, not a read-only preview.
+
+## Metadata written and limitations
+
+| Field | Application behavior |
+|---|---|
+| Title | Replaced by generated title |
+| Caption | Replaced by generated description |
+| Keywords | Generated keywords are added; existing keywords are not cleared |
+| Instructions | Replaced by the generated agency-routing tag |
+| Editorial/commercial | Returned classification; do not infer a dedicated Lightroom release field was updated |
+
+**Skip Existing** excludes photos having a title, caption, or keyword at
+submission time. Instructions alone do not trigger that test. **Overwrite**
+allows those photos into the job, but keywords are still added rather than
+replaced. The prompt's wording is broader than the actual keyword behavior.
+
+The plug-in does not write GPS, capture date, city, country, releases, or Develop
+adjustments back to Lightroom. Location/date context contributes to generated
+text. It does not submit files to Getty, Adobe Stock, or Shutterstock.
+
+The current hybrid path requires GPS extracted from the preview itself;
+passing context coordinates is not a substitute for missing preview EXIF.
+Previews are JPEG, exported into a 1200-by-1200 bounding box with metadata
+preservation requested. Original-format eligibility depends on Lightroom
+export; there is no documented complete source-format matrix or dedicated
+video workflow.
+
+## Architecture and data flow
+
+```mermaid
+flowchart LR
+    L[Lightroom plug-in] -->|Manifest and JPEG previews| A[FastAPI server]
+    A --> M[Local vision model]
+    A --> F[Optional cloud fallback]
+    A --> G[Nominatim and Wikipedia]
+    A <--> J[Filesystem jobs and checkpoints]
+    A -->|Completed metadata| L
+    L <--> S[Local recovery state]
+    L --> C[Lightroom catalog]
 ```
 
-For safer credential management, leave API-key fields blank and provide keys through environment variables instead:
+AI proposes metadata; server contracts and routing policies constrain it;
+Lightroom validates downloaded result membership/types and performs catalog
+writes. Unlike AutoDevelop-AI, this application has **no learning database**.
 
-```powershell
-$env:GEMINI_API_KEY = "your-key"
-# or
-$env:OPENAI_API_KEY = "your-key"
-```
+Durable IDs, upload hashes, photo checkpoints, cached results, and a local
+applied-job flag reduce repeated work. They do not make server files and catalog
+writes a single transaction. See [architecture, design, and workflow](docs/ARCHITECTURE.md).
 
-Never commit API keys to GitHub.
+## Agency routing
 
-## Install the Lightroom Plugin
+The Instructions field contains one of:
 
-1. Open Lightroom Classic.
-2. Go to **File > Plug-in Manager**.
-3. Select **Add**.
-4. Choose the `lightroom-plugin/LRStockMetadata.lrplugin` folder from this repository.
-5. Select the installed plugin and set its server URL, for example:
+- `agency:getty_editorial`
+- `agency:getty_commercial`
+- `agency:adobe_shutterstock`
+- `agency:shutterstock_editorial`
 
-   ```text
-   http://localhost:8003
-   ```
+The initial metadata pass establishes editorial/commercial classification.
+Optional comparative review can change destination while preserving that
+classification. Sequence review uses merit, technical thresholds, and diversity;
+the Getty ratio is a planning target, not a quota or acceptance guarantee.
+See [routing configuration and pipeline](server/README.md#processing-and-routing).
 
-6. Open **Library > Plug-in Extras > Generate Stock Metadata**.
+## Recovery and rollback
 
-If Lightroom and the server run on different computers, use the server computer's reachable LAN IP address instead of `localhost`.
+Only one active client job is tracked at a time. Use
+**Check Job Status / Apply Results** before creating a replacement.
 
-## Using the Plugin
+| Situation | Behavior |
+|---|---|
+| Upload response lost | Recover the saved job; acknowledged previews need not be uploaded again |
+| Server running | Check later; there is no running-job cancel endpoint |
+| Failed/interrupted server job | Choose Resume Job; completed photo/review checkpoints can be reused |
+| Failed/interrupted job no longer wanted | More Options offers confirmed deletion of server artifacts and local previews |
+| Result downloaded but application failed | Cached results remain for retry; inspect possibly changed photos first |
+| Job marked applied | Ordinary rechecking does not apply it again |
 
-### Submit a Job
+Application uses **batches of 25 photos**, not a single all-or-nothing batch.
+Earlier writes can remain if a later batch fails. A local applied flag is saved
+after the entire operation, so interruption can leave partial catalog changes
+without that flag. There is no saved per-photo pre-edit snapshot or automatic
+metadata rollback. Retrying can overwrite newer title/caption/Instructions.
 
-1. Select eligible photos in Lightroom's Library module.
-2. Choose **Library > Plug-in Extras > Generate Stock Metadata**.
-3. Wait for the job to be acknowledged.
+Cancelling an export/upload dialog stops that client activity; it does not
+cancel server work already queued. Deleting a job does not undo catalog changes.
+Use Lightroom's available Undo/History or catalog backup as appropriate, and
+verify restoration. Photo-edit History alone should not be assumed to recover
+all catalog metadata.
 
-The plugin exports and uploads previews, then returns without modifying catalog metadata.
+## Updating an installation
 
-### Apply Completed Results
+1. Finish the active job or resolve it before updating. Stop the server and
+   close/reload Lightroom as appropriate.
+2. Back up the catalog, private YAML, configured job directories, local
+   plug-in state, and any required API upload artifacts.
+3. Check `git status --short` and preserve local edits. For a clean checkout,
+   use `git pull --ff-only`; do not discard changes to force an update.
+4. Keep the existing virtual environment and run
+   `.\.venv\Scripts\python.exe -m pip check`. Review requirement changes
+   separately; these update instructions do not upgrade dependencies.
+5. If the plug-in loads from this checkout, reload it in Plug-in Manager or
+   restart Lightroom. If installed as a separate copy, update the complete
+   plug-in folder with Lightroom closed, preserving configured job storage.
+6. Preserve private configuration and reselect `LR_METADATA_CONFIG` before
+   restarting. Do not overwrite it with the tracked default.
+7. Check health and run one complete GPS-enabled test job before a large batch.
 
-Choose:
-
-```text
-Library > Plug-in Extras > Check Job Status / Apply Results
-```
-
-When complete, the plugin downloads, validates, caches, and applies the result in one Lightroom catalog write.
-
-Metadata written to Lightroom includes:
-
-- Title
-- Caption
-- Keywords
-- Instructions, including the agency destination
-
-## Durable Jobs and Recovery
-
-Jobs are designed to survive interruptions.
-
-- Preview uploads are idempotent; only missing previews are uploaded again.
-- Each completed photo is checkpointed on the server.
-- A server restart marks active work as interrupted; rerunning the job resumes from its checkpoint.
-- Lightroom can be closed after a job is successfully queued.
-- Downloaded results are cached locally before catalog metadata is changed.
-- If applying metadata to the catalog fails, retry it without regenerating server results.
-
-The server stores job data in the configured `jobs_dir` (default: `_jobs/`). These files are retained for recovery and are not automatically deleted.
-
-Only one active Lightroom job is tracked at a time. Apply or resolve the active job before submitting another one.
-
-## Agency Routing
-
-The server assigns one of these values to Lightroom's Instructions field:
-
-```text
-agency:getty_editorial
-agency:getty_commercial
-agency:adobe_shutterstock
-agency:shutterstock_editorial
-```
-
-The initial metadata pass determines whether an image is editorial or commercial. The agency review may change the destination agency, but does not change that classification.
-
-Getty selection uses configured quality and merit thresholds, sequence-level duplicate review, and a preference for visually differentiated images. The configured Getty ratio is a planning target, not a quota.
-
-## API Overview
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/health` | Confirm server availability |
-| `POST` | `/generate-metadata` | Generate metadata for a single request |
-| `POST` | `/generate-metadata-json` | Generate metadata as JSON |
-| `POST` | `/jobs` | Create or reuse a durable job |
-| `GET` | `/jobs/{job_id}/uploads` | List acknowledged previews |
-| `POST` | `/jobs/{job_id}/photos/{photo_id}/preview` | Upload a preview |
-| `POST` | `/jobs/{job_id}/run` | Start or resume processing |
-| `GET` | `/jobs/{job_id}/status` | Retrieve progress and job state |
-| `GET` | `/jobs/{job_id}/result` | Retrieve completed results |
-
-For the upload and job-request formats, refer to the Lightroom plugin implementation and server models.
+There is no promised migration compatibility for every historical job snapshot.
+Keep backups and avoid mixing server/plug-in versions during an active job.
 
 ## Troubleshooting
 
-| Problem | Suggested fix |
-| --- | --- |
-| Server is offline | Start `run_server.bat` and confirm the plugin URL matches `server/config.yaml`. |
-| Local model is unavailable | Start LM Studio, load a compatible vision model, and verify its model ID in the configuration. |
-| Plugin cannot connect from another computer | Use the server's LAN IP address, verify firewall rules, and ensure the server binds to a reachable host. |
-| Cloud fallback fails | Confirm it is enabled, the selected provider is correct, and its API key is available. |
-| Upload was interrupted | Run **Check Job Status / Apply Results**; only missing previews should upload again. |
-| Server job was interrupted | Use **Check Job Status / Apply Results** and choose to resume when prompted. |
-| Metadata was not written | Lightroom may restrict some source metadata fields. This plugin writes title, caption, keywords, and Instructions. |
+| Problem | Check |
+|---|---|
+| Cannot connect | Match plug-in URL to server port 8003, not the initial 8008 default |
+| Environment setting ignored | Nonempty YAML takes precedence; check selected config and restart |
+| Missing GPS error | Verify exported preview contains GPS EXIF; context alone is insufficient |
+| Health works but generation fails | Check model ID, image support, GPS, location lookups, and server errors |
+| Existing photos skipped | Choose Overwrite deliberately; Skip Existing tests title/caption/keywords |
+| Metadata unchanged after submission | Run Check Job Status / Apply Results |
+| Stuck active job | Recover/check it; failed/interrupted jobs offer resume or confirmed deletion |
+| Apply error | Inspect partial writes; cached results can be retried without regeneration |
+| Cloud fallback fails | Check enabled flag, provider/model, and blank-YAML/environment key handling |
 
-## Privacy and Data Handling
+## Privacy, development, and license
 
-Preview JPEGs and job artifacts are stored locally in the configured server job directory. When cloud fallback is disabled, metadata generation remains on your local model server.
+Previews can contain GPS and other embedded metadata. Server jobs, raw model
+diagnostics, uploaded images, and local recovery artifacts can be retained.
+There is no automatic retention period or application-level encryption.
+See [SECURITY.md](SECURITY.md) before sharing data or enabling network access.
 
-Enabling cloud fallback may send preview images and associated processing input to the selected cloud provider. Review that provider's policies before enabling it.
+Run the automated suites from the repository root:
 
-## License
+```powershell
+.\.venv\Scripts\python.exe -m unittest server.test_async_jobs server.test_agency_reviewer -q
+```
 
-Add a license file before publishing the repository, then link it here.
+These use mocks and synthetic fixtures. The separate `server/test_client.py`
+is a manual live-server utility, not a self-contained unit suite.
+See [CONTRIBUTING.md](CONTRIBUTING.md), [server API documentation](server/README.md),
+and [plug-in guide](lightroom-plugin/LRStockMetadata.lrplugin/README.md).
 
-## Contributing
-
-Issues and pull requests are welcome. Please avoid including API keys, personal IP addresses, Lightroom catalogs, original photos, or generated job files in contributions.
+Original project code and documentation use the [MIT license](LICENSE).
+External libraries, services, models, Adobe software, and data have separate
+terms; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,90 +1,102 @@
-# LR Stock Metadata Lightroom Plugin
+# Lightroom plug-in guide
 
-Lightroom Classic plugin for sending photo previews to LR Stock Metadata Server and applying completed stock metadata to the catalog.
+This plug-in submits JPEG previews to LR Stock Metadata Server and applies the
+completed title, caption, keywords, and Instructions to Lightroom's catalog.
+It does not change Develop settings or upload stock-agency submissions.
 
-## Architecture
+Follow the [main installation guide](../../README.md#setup) first.
 
-Photos remain in Lightroom. The plugin exports JPEG previews, submits them to the FastAPI server as a durable job, and later applies the completed metadata result in one catalog write. The server stores recovery artifacts locally and uses a local vision model by default; cloud fallback is optional.
+## Install and configure
 
-See the repository's [architecture and data-flow overview](../../README.md#architecture-and-data-flow) for the complete flow between Lightroom, the plugin, the server, model provider, and local job storage.
+1. Open **File > Plug-in Manager > Add** and select this complete folder.
+2. Select **05 LR Stock Metadata**.
+3. In **LR Stock Metadata Server**, set **Server URL** to match the backend.
+   The committed server config uses `http://localhost:8003`; the plug-in's
+   initial default is `http://localhost:8008`.
+4. Set **Local job storage**, defaulting to Documents/LR Stock Metadata Jobs.
 
-## Install
+Settings are local Lightroom preferences. Saved values override
+[PluginConfig.lua](PluginConfig.lua). The plug-in appends API paths itself.
+Do not enter `/jobs` or `/health` in Server URL.
 
-1. Open Lightroom Classic.
-2. Go to **File > Plug-in Manager**.
-3. Select **Add**.
-4. Select this `LRStockMetadata.lrplugin` folder.
-5. Select **LR Stock Metadata** in the Plug-in Manager list.
+For a proxy base path, the proxy must strip that prefix before forwarding API
+requests. For another computer, use its reachable private server address and
+restricted firewall rules. See [server URLs](../../server/README.md#api-reference)
+and [security limits](../../SECURITY.md).
 
-## Configure the Server URL
+## Generate Stock Metadata
 
-In Lightroom Classic, open:
+Select test photos, then run
+**Library > Plug-in Extras > Generate Stock Metadata**.
 
-```text
-File > Plug-in Manager > LR Stock Metadata > LR Stock Metadata Server
-```
+- Choose **Overwrite** to include photos even when metadata exists.
+- Choose **Skip Existing** to exclude photos with any title, caption, or keyword.
+  Existing Instructions alone do not trigger this skip.
+- JPEG previews preserve metadata and use a 1200-by-1200 export bounding box.
+- The current server path needs readable GPS in each preview, not merely
+  coordinates in an API context object.
+- Wait for a successful queued acknowledgment before disconnecting.
+- Keep the backend and model running while Lightroom is disconnected.
 
-Enter the URL of your metadata server. Do not add a trailing slash.
+Submission saves a local job and uploads binary previews. It does not change
+catalog metadata. Only one active client job is tracked.
 
-| Deployment | Example URL |
-| --- | --- |
-| Direct local FastAPI server | `http://localhost:8003` |
-| Direct server on your network | `http://192.168.1.50:8003` |
-| Local reverse proxy | `http://localhost:8080/metadata` |
+## Check Job Status / Apply Results
 
-The server must receive paths appended by the plugin, including `/jobs`, `/health`, and `/generate-metadata`. A reverse proxy using a base path such as `/metadata` must strip that prefix before forwarding requests to the FastAPI service.
+Run **Library > Plug-in Extras > Check Job Status / Apply Results**.
 
-The Plug-in Manager value is stored in Lightroom's local plugin preferences and overrides the default in [`PluginConfig.lua`](PluginConfig.lua). Changing the committed default does not replace an existing saved preference.
+| State | Behavior |
+|---|---|
+| Submitting | Recover saved manifest and missing uploads |
+| Running | Show progress; check again later |
+| Failed/interrupted | Offer Resume Job or More Options for confirmed deletion |
+| Completed | Download, validate, cache, and apply results |
+| Downloaded after application failure | Retry from cached results |
+| Applied | Report that the job has already been applied |
 
-`PluginConfig.lua` provides the public safe default:
+**Checking a completed job can immediately apply metadata.** There is no
+separate per-photo approval screen. The catalog must match the submitting
+catalog, and original photos must resolve. Result job/photo membership and
+metadata types are checked before application.
 
-```lua
-return {
-    serverUrl = "http://localhost:8008",
-}
-```
+## What changes in Lightroom
 
-For a direct connection, update the Plug-in Manager URL to match the host and port configured in `server/config.yaml`. The committed server configuration uses `http://localhost:8003`.
+Title, caption, and Instructions are overwritten. Generated keywords are
+added; existing keywords are not removed. The submission prompt mentions
+overwriting keywords, but the actual application code adds them.
 
-## Submit Metadata Generation
+Agency routing is written as an `agency:...` Instructions tag. Location,
+capture date, release fields, and editorial/commercial flags are not written
+as separate dedicated Lightroom metadata fields.
 
-1. Select eligible photos in Lightroom's Library module.
-2. Choose **Library > Plug-in Extras > Generate Stock Metadata**.
-3. Wait for Lightroom to confirm that the job has been queued.
+Application uses write-access batches of **25 photos**. A later error can
+leave earlier writes in place. A job-level applied flag is saved only after
+all batches succeed; there is no per-photo applied checkpoint or pre-edit
+metadata snapshot. A retry can reapply cached results and overwrite intervening
+manual changes. Do not treat it as guaranteed exactly-once application.
 
-The plugin exports persistent JPEG previews, uploads them to the server, and creates a durable job. It does not modify catalog metadata during submission.
+## Recovery, stopping, and undo
 
-After the server acknowledges the job, Lightroom and the submitting computer can be closed or disconnected. The metadata server and its configured model service must remain available while processing continues.
+Cancelling a client export/upload dialog does not cancel server work already
+queued. There is no server running-job cancellation endpoint. Running jobs
+cannot be deleted by the API. Failed/interrupted jobs offer explicit deletion,
+which removes server artifacts and local previews; that is irreversible.
 
-## Apply Results or Resume Work
+A failed application retains downloaded results for retry but does not
+automatically restore old metadata. Deleting jobs does not undo catalog
+changes. Use appropriate Lightroom Undo tools or a catalog backup and verify
+metadata restoration; Develop History alone may not recover catalog fields.
 
-Reconnect to the server and choose:
+Keep job folders until the job is resolved. Back them up before updates and
+avoid mixing plug-in/server versions during active work. See
+[update instructions](../../README.md#updating-an-installation) and
+[architecture and safeguards](../../docs/ARCHITECTURE.md).
 
-```text
-Library > Plug-in Extras > Check Job Status / Apply Results
-```
+## Privacy
 
-This command can:
+Local manifests can contain catalog paths, original filenames, IDs, and
+capture/location context. Previews can include embedded GPS. The server can
+contact location services even with cloud AI fallback disabled.
 
-- Resume an interrupted preview upload.
-- Resume an interrupted server job.
-- Download and validate completed metadata.
-- Apply title, caption, keywords, and agency Instructions in one catalog write.
-
-The plugin caches the full downloaded result before modifying the catalog. If a catalog write fails, retry applying the cached result without rerunning metadata generation. No partial server result is applied.
-
-## Local Job Storage
-
-The Plug-in Manager also configures local durable job storage. By default, it is the `LR Stock Metadata Jobs` folder in your Documents directory.
-
-Local previews, manifests, active-job state, and downloaded results are retained for recovery. Only one active Lightroom job is tracked at a time; apply or resolve it before submitting another one.
-
-## Troubleshooting
-
-| Problem | Suggested fix |
-| --- | --- |
-| Cannot connect to the server | Confirm the URL in Plug-in Manager, start the server, and open its `/health` endpoint in a browser. |
-| Connection works locally but not from another computer | Use the server computer's LAN address and check its host binding and firewall. |
-| Job is interrupted | Run **Check Job Status / Apply Results** and choose to resume when prompted. |
-| Metadata does not appear | Lightroom may restrict source metadata fields. The plugin writes title, caption, keywords, and Instructions. |
-| Changed the default URL but Lightroom still uses an old one | Edit the Plug-in Manager value; it overrides `PluginConfig.lua`. |
+Do not attach catalogs, previews, raw job results, or unreviewed diagnostics
+to public issues. See [SECURITY.md](../../SECURITY.md).
