@@ -1,6 +1,47 @@
-__pycache__/
-*.py[cod]
-.venv/
+# Credentials
+.env
+.env.*
+!.env.example
+
+# Production configuration
+/server/config.yaml
+*.local.yaml
+*.local.yml
+*.pem
+*.key
+
+# Processing data
 _uploads/
 _jobs/
 _resized_for_ai/
+previews/
+logs/
+output/
+runtime/
+
+# Databases and logs
+*.db
+*.db-*
+*.sqlite*
+*.log
+
+# Photography data
+*.jpg
+*.jpeg
+*.nef
+*.dng
+*.arw
+*.cr2
+*.cr3
+*.lrcat
+*.lrcat-data
+*.lrdata/
+
+# Python and development
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.vscode/
+.idea/

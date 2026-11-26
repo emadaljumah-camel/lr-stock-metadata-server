@@ -6,22 +6,25 @@ the implementation-facing configuration and endpoints.
 ## Configuration
 
 [config.py](config.py) reads `LR_METADATA_CONFIG` or the default
-[config.yaml](config.yaml) at import/startup. Use a machine-private file outside
-the repository for deployment values. There is no automatic `.env` loader here;
-set environment variables in the launching process.
+`config.yaml` at import/startup. This local file is ignored; create it from
+[config.example.yaml](config.example.yaml) on first setup, or use a machine-private
+file outside the repository selected with `LR_METADATA_CONFIG`.
+There is no automatic `.env` loader here; set environment variables in the
+launching process. Never overwrite an existing private configuration. The
+example is not automatically loaded.
 
 **Precedence: nonempty YAML value, then supported environment variable, then
 built-in default.** Boolean false and numeric values in YAML are real settings,
 not invitations to fall back to the environment. Restart after edits.
 
-| Setting | Committed configuration / behavior |
+| Setting | Example configuration / behavior |
 |---|---|
 | `server.host` / `server.port` | localhost / 8003; built-in fallback without config is 127.0.0.1 / 8008 |
 | `server.jobs_dir` | `_jobs`; relative storage paths resolve from process working directory |
 | `server.upload_dir` | `_uploads`; used by synchronous upload endpoints |
 | `server.max_job_workers` | 1; use one Uvicorn process with this filesystem store |
 | `models.lm_studio_base_url` | `http://localhost:1234/v1` |
-| `models.hybrid_local_model` | Exact loaded image-capable model ID; committed value is an example, not a compatibility guarantee |
+| `models.hybrid_local_model` | Exact loaded image-capable model ID; template value is an example, not a compatibility guarantee |
 | `models.allow_cloud_fallback` | false |
 | `models.fallback_provider` | gemini or openai |
 | Provider API keys | Keep YAML cloud keys blank and use `GEMINI_API_KEY` or `OPENAI_API_KEY` |

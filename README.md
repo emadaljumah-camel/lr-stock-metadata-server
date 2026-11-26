@@ -55,20 +55,26 @@ environment and follow [Updating an installation](#updating-an-installation).
 
 ### 2. Configure the model and server
 
-The tracked [server/config.yaml](server/config.yaml) is the default configuration.
-For machine-specific settings, copy it **outside the repository** and select
-that copy with `LR_METADATA_CONFIG`. For example, on first setup:
+The tracked [server/config.example.yaml](server/config.example.yaml) is a
+configuration template with blank cloud credentials. For machine-specific
+settings, copy it **outside the repository** and select that copy with
+`LR_METADATA_CONFIG`. For example, on first setup:
 
 ```powershell
 $settingsFolder = Join-Path $env:LOCALAPPDATA "LRStockMetadata"
 New-Item -ItemType Directory -Force -Path $settingsFolder | Out-Null
-Copy-Item server\config.yaml (Join-Path $settingsFolder "config.yaml")
+Copy-Item server\config.example.yaml (Join-Path $settingsFolder "config.yaml")
 $env:LR_METADATA_CONFIG = Join-Path $settingsFolder "config.yaml"
 ```
 
 Do not recopy over an existing private configuration. This environment variable
 applies to the current shell and processes started from it; set it again or
 persist it deliberately for later launches.
+
+Alternatively, on first setup copy `server/config.example.yaml` to
+`server/config.yaml`, which is ignored and remains the default local path.
+Existing installations keep that file and its settings unchanged. Do not
+overwrite an existing local configuration. The example is not loaded directly.
 
 Edit these entries in that configuration, keeping the other sections:
 
@@ -95,7 +101,7 @@ built-in defaults apply. This differs from many applications. An environment
 variable will not override an already populated YAML setting. The selected
 configuration is read at import/startup; restart after changes.
 
-The committed configuration uses port **8003**, but the plug-in's initial URL
+The configuration example uses port **8003**, but the plug-in's initial URL
 uses **8008**. Set the plug-in URL explicitly in step 4. If no configuration is
 available, the backend's built-in port fallback is also 8008.
 
@@ -274,7 +280,7 @@ all catalog metadata.
    restart Lightroom. If installed as a separate copy, update the complete
    plug-in folder with Lightroom closed, preserving configured job storage.
 6. Preserve private configuration and reselect `LR_METADATA_CONFIG` before
-   restarting. Do not overwrite it with the tracked default.
+   restarting. Do not overwrite it with the configuration example.
 7. Check health and run one complete GPS-enabled test job before a large batch.
 
 There is no promised migration compatibility for every historical job snapshot.

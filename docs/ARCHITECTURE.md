@@ -151,7 +151,7 @@ state first.
 
 [config.py](../server/config.py) implements nonempty YAML, then supported
 environment variables, then defaults. Settings are loaded at import/startup.
-The tracked config and plug-in initial URL use different ports; the setup guide
+The configuration example and plug-in initial URL use different ports; the setup guide
 deliberately tells users to set Lightroom to the configured server port.
 
 The documentation review ran 43 unit/mock tests on the existing Windows Python

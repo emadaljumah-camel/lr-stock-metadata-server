@@ -43,15 +43,20 @@ folders to avoid copying inconsistent in-progress state.
 
 ## Credentials and repository hygiene
 
-Keep cloud API-key fields blank in tracked YAML. Use environment variables, or
-a private YAML file outside the checkout selected with `LR_METADATA_CONFIG`.
+Keep cloud API-key fields blank in the tracked configuration example. Use
+environment variables, or a private YAML file outside the checkout selected
+with `LR_METADATA_CONFIG`.
 There is no automatic `.env` loader in this project. Nonempty YAML takes
 precedence over supported environment variables, including keys.
 
-The tracked config contains an `lm-studio` local-server key placeholder; it is
+The tracked example contains an `lm-studio` local-server key placeholder; it is
 not protection for this API. Never replace it with a real secret in committed
 configuration. Ignore rules cover common runtime folders, but do not erase old
 commits or protect arbitrary private files placed elsewhere in the repository.
+The default `server/config.yaml` is intentionally untracked and ignored. Keep
+production secrets there or in an external configuration, never in the example.
+Before publication, scan reachable history as well as the current snapshot;
+ignore rules do not protect tracked files or erase historical content.
 
 Do not attach photos, catalogs, GPS-bearing previews, unredacted errors, or raw
 job directories to public issues. Rotate exposed credentials; removing them
